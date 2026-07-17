@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -688,6 +689,7 @@ func (a *ACPAgent) chatCodexAppServerWithInput(ctx context.Context, conversation
 	} else {
 		log.Printf("[acp] reusing thread (pid=%d, thread=%s, conversation=%s)", pid, threadID, conversationID)
 	}
+	existingGeneratedImages := snapshotCodexGeneratedImages(threadID)
 
 	// Register turn event channel
 	turnCh := make(chan *codexTurnEvent, 256)
@@ -735,12 +737,73 @@ func (a *ACPAgent) chatCodexAppServerWithInput(ctx context.Context, conversation
 			}
 			if evt.Kind == "completed" {
 				result := strings.TrimSpace(strings.Join(textParts, ""))
+				result = appendNewCodexGeneratedImages(result, threadID, existingGeneratedImages)
 				if result == "" {
 					return "", fmt.Errorf("agent returned empty response")
 				}
 				return result, nil
 			}
 		}
+	}
+}
+
+func snapshotCodexGeneratedImages(threadID string) map[string]struct{} {
+	paths := codexGeneratedImagePaths(threadID)
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		seen[path] = struct{}{}
+	}
+	return seen
+}
+
+func appendNewCodexGeneratedImages(reply, threadID string, existing map[string]struct{}) string {
+	var newPaths []string
+	for _, path := range codexGeneratedImagePaths(threadID) {
+		if _, ok := existing[path]; ok {
+			continue
+		}
+		newPaths = append(newPaths, path)
+	}
+	if len(newPaths) == 0 {
+		return reply
+	}
+	if strings.TrimSpace(reply) == "" {
+		return strings.Join(newPaths, "\n")
+	}
+	return strings.TrimSpace(reply) + "\n" + strings.Join(newPaths, "\n")
+}
+
+func codexGeneratedImagePaths(threadID string) []string {
+	if threadID == "" {
+		return nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil
+	}
+	root := filepath.Join(home, ".codex", "generated_images", threadID)
+	var paths []string
+	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if isCodexGeneratedImagePath(path) {
+			paths = append(paths, path)
+		}
+		return nil
+	}); err != nil {
+		return nil
+	}
+	sort.Strings(paths)
+	return paths
+}
+
+func isCodexGeneratedImagePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp":
+		return true
+	default:
+		return false
 	}
 }
 

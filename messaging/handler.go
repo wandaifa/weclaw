@@ -42,6 +42,13 @@ type Handler struct {
 	contextTokens sync.Map // map[userID]contextToken
 	saveDir       string   // directory to save images/files to
 	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
+	pendingMedia  sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
+}
+
+type pendingMedia struct {
+	Kind string
+	Name string
+	Path string
 }
 
 // NewHandler creates a new message handler.
@@ -57,6 +64,25 @@ func NewHandler(factory AgentFactory, saveDefault SaveDefaultFunc) *Handler {
 // SetSaveDir sets the directory for saving images and files.
 func (h *Handler) SetSaveDir(dir string) {
 	h.saveDir = dir
+}
+
+func defaultInboundImageDir() string {
+	return filepath.Join(defaultAttachmentWorkspace(), "inbound-images")
+}
+
+func defaultInboundFileDir() string {
+	return filepath.Join(defaultAttachmentWorkspace(), "inbound-files")
+}
+
+func defaultInboundVideoDir() string {
+	return filepath.Join(defaultAttachmentWorkspace(), "inbound-videos")
+}
+
+func defaultInboundMediaDir(kind string) string {
+	if kind == "video" {
+		return defaultInboundVideoDir()
+	}
+	return defaultInboundFileDir()
 }
 
 // cleanSeenMsgs removes entries older than 5 minutes from the dedup cache.
@@ -293,6 +319,14 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 			h.handleImageMessage(ctx, client, msg, img)
 			return
 		}
+		if video := extractVideo(msg); video != nil {
+			h.handleStoredMediaMessage(ctx, client, msg, "video", "", video.Media)
+			return
+		}
+		if file := extractFile(msg); file != nil {
+			h.handleStoredMediaMessage(ctx, client, msg, "file", file.FileName, file.Media)
+			return
+		}
 		log.Printf("[handler] bot=%s received non-text message from %s, skipping", botID, msg.FromUserID)
 		return
 	}
@@ -354,6 +388,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	}
 
 	// Route: "/agentname message" or "@agent1 @agent2 message" -> specific agent(s)
+	text = h.withPendingMediaContext(msg.FromUserID, text)
 	agentNames, message := h.parseCommand(text)
 
 	// No command prefix -> send to default agent
@@ -526,7 +561,10 @@ func (h *Handler) sendReplyWithMedia(ctx context.Context, client *ilink.Client, 
 }
 
 func (h *Handler) allowedAttachmentRoots(agentName string) []string {
-	roots := []string{defaultAttachmentWorkspace()}
+	roots := []string{
+		defaultAttachmentWorkspace(),
+		defaultCodexGeneratedImagesRoot(),
+	}
 
 	h.mu.RLock()
 	agentDir := h.agentWorkDirs[agentName]
@@ -716,6 +754,24 @@ func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {
 	return nil
 }
 
+func extractVideo(msg ilink.WeixinMessage) *ilink.VideoItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeVideo && item.VideoItem != nil {
+			return item.VideoItem
+		}
+	}
+	return nil
+}
+
+func extractFile(msg ilink.WeixinMessage) *ilink.FileItem {
+	for _, item := range msg.ItemList {
+		if item.Type == ilink.ItemTypeFile && item.FileItem != nil {
+			return item.FileItem
+		}
+	}
+	return nil
+}
+
 func extractVoiceText(msg ilink.WeixinMessage) string {
 	for _, item := range msg.ItemList {
 		if item.Type == ilink.ItemTypeVoice && item.VoiceItem != nil && item.VoiceItem.Text != "" {
@@ -748,6 +804,10 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 
 	mimeType := detectImageMime(data)
 	log.Printf("[handler] bot=%s downloaded image from %s (%d bytes, %s)", botID, msg.FromUserID, len(data), mimeType)
+
+	if _, err := saveInboundImage(defaultInboundImageDir(), msg.FromUserID, data); err != nil {
+		log.Printf("[handler] bot=%s failed to save inbound image from %s: %v", botID, msg.FromUserID, err)
+	}
 
 	if h.saveDir != "" {
 		go h.handleImageSave(ctx, client, msg, img)
@@ -785,6 +845,180 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 	agentName := h.defaultName
 	h.mu.RUnlock()
 	h.sendReplyWithMedia(ctx, client, msg, agentName, reply, clientID)
+}
+
+func (h *Handler) handleStoredMediaMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, kind, fileName string, media *ilink.MediaInfo) {
+	botID := client.BotID()
+	log.Printf("[handler] bot=%s received %s from %s, downloading...", botID, kind, msg.FromUserID)
+
+	if media == nil || media.EncryptQueryParam == "" {
+		log.Printf("[handler] bot=%s %s has no media info from %s", botID, kind, msg.FromUserID)
+		return
+	}
+	data, err := DownloadFileFromCDN(ctx, media.EncryptQueryParam, media.AESKey)
+	if err != nil {
+		log.Printf("[handler] bot=%s failed to download %s from %s: %v", botID, kind, msg.FromUserID, err)
+		return
+	}
+
+	contentType := inferInboundMediaContentType(kind, fileName)
+	path, err := saveInboundMedia(defaultInboundMediaDir(kind), msg.FromUserID, kind, fileName, data, contentType)
+	if err != nil {
+		log.Printf("[handler] bot=%s failed to save inbound %s from %s: %v", botID, kind, msg.FromUserID, err)
+		return
+	}
+
+	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
+	h.addPendingMedia(msg.FromUserID, pendingMedia{Kind: kind, Name: safeInboundMediaName(fileName, kind, contentType), Path: path})
+	log.Printf("[handler] queued inbound %s from %s for next text instruction: %s", kind, msg.FromUserID, path)
+}
+
+func (h *Handler) addPendingMedia(userID string, media pendingMedia) {
+	value, _ := h.pendingMedia.LoadOrStore(userID, []pendingMedia{})
+	items := append(value.([]pendingMedia), media)
+	h.pendingMedia.Store(userID, items)
+}
+
+func (h *Handler) withPendingMediaContext(userID, text string) string {
+	value, ok := h.pendingMedia.LoadAndDelete(userID)
+	if !ok {
+		return text
+	}
+	items, ok := value.([]pendingMedia)
+	if !ok || len(items) == 0 {
+		return text
+	}
+
+	var b strings.Builder
+	b.WriteString(text)
+	b.WriteString("\n\n用户刚才发送的附件如下，请只在本次需求需要时使用：\n")
+	for _, item := range items {
+		b.WriteString("- ")
+		b.WriteString(mediaKindLabel(item.Kind))
+		if item.Name != "" {
+			b.WriteString("：")
+			b.WriteString(item.Name)
+		}
+		b.WriteString("\n  本机路径：")
+		b.WriteString(item.Path)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func saveInboundImage(dir, userID string, data []byte) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	ts := time.Now().Format("20060102-150405")
+	fileName := fmt.Sprintf("%s-%s%s", ts, safeFileToken(userID), detectImageExt(data))
+	filePath := filepath.Join(dir, fileName)
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return "", err
+	}
+	log.Printf("[handler] saved inbound image from %s to %s (%d bytes)", userID, filePath, len(data))
+	return filePath, nil
+}
+
+func saveInboundMedia(dir, userID, kind, fileName string, data []byte, contentType string) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	ts := time.Now().Format("20060102-150405")
+	name := safeInboundMediaName(fileName, kind, contentType)
+	filePath := filepath.Join(dir, fmt.Sprintf("%s-%s-%s", ts, safeFileToken(userID), name))
+	if err := os.WriteFile(filePath, data, 0o644); err != nil {
+		return "", err
+	}
+	log.Printf("[handler] saved inbound %s from %s to %s (%d bytes)", kind, userID, filePath, len(data))
+	return filePath, nil
+}
+
+func safeInboundMediaName(fileName, kind, contentType string) string {
+	name := filepath.Base(strings.TrimSpace(fileName))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		name = kind + inboundMediaExt(kind, contentType)
+	}
+	var b strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	name = strings.Trim(b.String(), "._")
+	if name == "" {
+		name = kind + inboundMediaExt(kind, contentType)
+	}
+	if filepath.Ext(name) == "" {
+		name += inboundMediaExt(kind, contentType)
+	}
+	return name
+}
+
+func inferInboundMediaContentType(kind, fileName string) string {
+	if fileName != "" {
+		return inferContentType(fileName)
+	}
+	if kind == "video" {
+		return "video/mp4"
+	}
+	return "application/octet-stream"
+}
+
+func inboundMediaExt(kind, contentType string) string {
+	if contentType != "" {
+		if ext := extensionByContentType(contentType); ext != "" {
+			return ext
+		}
+	}
+	if kind == "video" {
+		return ".mp4"
+	}
+	return ".bin"
+}
+
+func extensionByContentType(contentType string) string {
+	switch strings.ToLower(strings.Split(contentType, ";")[0]) {
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	case "application/pdf":
+		return ".pdf"
+	case "text/plain":
+		return ".txt"
+	}
+	return ""
+}
+
+func mediaKindLabel(kind string) string {
+	switch kind {
+	case "video":
+		return "视频"
+	case "file":
+		return "文件"
+	default:
+		return "媒体文件"
+	}
+}
+
+func safeFileToken(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	token := b.String()
+	if len(token) > 24 {
+		return token[len(token)-24:]
+	}
+	if token == "" {
+		return "unknown"
+	}
+	return token
 }
 
 func detectImageMime(data []byte) string {

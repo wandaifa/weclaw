@@ -70,6 +70,23 @@ func TestIsAllowedAttachmentPath(t *testing.T) {
 	}
 }
 
+func TestDefaultCodexGeneratedImagesRootIsAllowed(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	imagePath := filepath.Join(home, ".codex", "generated_images", "thread-1", "image.png")
+	if err := os.MkdirAll(filepath.Dir(imagePath), 0o755); err != nil {
+		t.Fatalf("mkdir generated image dir: %v", err)
+	}
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatalf("write generated image: %v", err)
+	}
+
+	if !isAllowedAttachmentPath(imagePath, []string{defaultCodexGeneratedImagesRoot()}) {
+		t.Fatalf("expected generated image path to be allowed")
+	}
+}
+
 func TestRewriteReplyWithAttachmentResults(t *testing.T) {
 	sentPath := "/tmp/report.pdf"
 	failedPath := "/tmp/archive.zip"

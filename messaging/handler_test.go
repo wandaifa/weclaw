@@ -1,6 +1,8 @@
 package messaging
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -136,5 +138,96 @@ func TestBuildHelpText(t *testing.T) {
 	}
 	if !strings.Contains(text, "/help") {
 		t.Error("help text should mention /help")
+	}
+}
+
+func TestSaveInboundImage(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte{0x89, 0x50, 0x4E, 0x47, 1, 2, 3}
+
+	path, err := saveInboundImage(dir, "abc@im.wechat", data)
+	if err != nil {
+		t.Fatalf("saveInboundImage returned error: %v", err)
+	}
+	if filepath.Dir(path) != dir {
+		t.Fatalf("saved path dir = %q, want %q", filepath.Dir(path), dir)
+	}
+	if filepath.Ext(path) != ".png" {
+		t.Fatalf("saved path ext = %q, want .png", filepath.Ext(path))
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved image: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("saved data = %v, want %v", got, data)
+	}
+}
+
+func TestSaveInboundMedia(t *testing.T) {
+	dir := t.TempDir()
+	data := []byte("hello")
+
+	path, err := saveInboundMedia(dir, "abc@im.wechat", "file", "../report final.pdf", data, "application/pdf")
+	if err != nil {
+		t.Fatalf("saveInboundMedia returned error: %v", err)
+	}
+	if filepath.Dir(path) != dir {
+		t.Fatalf("saved path dir = %q, want %q", filepath.Dir(path), dir)
+	}
+	if filepath.Ext(path) != ".pdf" {
+		t.Fatalf("saved path ext = %q, want .pdf", filepath.Ext(path))
+	}
+	if !strings.Contains(filepath.Base(path), "report_final.pdf") {
+		t.Fatalf("saved path base = %q, want sanitized filename", filepath.Base(path))
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read saved media: %v", err)
+	}
+	if string(got) != string(data) {
+		t.Fatalf("saved data = %v, want %v", got, data)
+	}
+}
+
+func TestDefaultInboundMediaDirByKind(t *testing.T) {
+	fileDir := defaultInboundMediaDir("file")
+	if filepath.Base(fileDir) != "inbound-files" {
+		t.Fatalf("file media dir = %q, want inbound-files", fileDir)
+	}
+
+	videoDir := defaultInboundMediaDir("video")
+	if filepath.Base(videoDir) != "inbound-videos" {
+		t.Fatalf("video media dir = %q, want inbound-videos", videoDir)
+	}
+}
+
+func TestWithPendingMediaContextConsumesOnce(t *testing.T) {
+	h := newTestHandler()
+	userID := "abc@im.wechat"
+	h.addPendingMedia(userID, pendingMedia{
+		Kind: "file",
+		Name: "report.pdf",
+		Path: "/tmp/report.pdf",
+	})
+
+	first := h.withPendingMediaContext(userID, "总结这个文件")
+	if !strings.Contains(first, "总结这个文件") {
+		t.Fatalf("context lost original text: %q", first)
+	}
+	if !strings.Contains(first, "/tmp/report.pdf") {
+		t.Fatalf("context missing media path: %q", first)
+	}
+
+	second := h.withPendingMediaContext(userID, "下一条")
+	if second != "下一条" {
+		t.Fatalf("pending media should be consumed once, got %q", second)
+	}
+}
+
+func TestSafeInboundMediaNameAddsVideoExt(t *testing.T) {
+	got := safeInboundMediaName("", "video", "video/mp4")
+	if got != "video.mp4" {
+		t.Fatalf("safeInboundMediaName() = %q, want video.mp4", got)
 	}
 }

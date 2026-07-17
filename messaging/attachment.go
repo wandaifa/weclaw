@@ -22,6 +22,14 @@ func defaultAttachmentWorkspace() string {
 	return filepath.Join(home, ".weclaw", "workspace")
 }
 
+func defaultCodexGeneratedImagesRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Clean(os.TempDir())
+	}
+	return filepath.Join(home, ".codex", "generated_images")
+}
+
 func extractLocalAttachmentPaths(text string) []string {
 	var paths []string
 	seen := make(map[string]struct{})
