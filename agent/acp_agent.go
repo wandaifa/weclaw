@@ -3,6 +3,7 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -114,8 +115,10 @@ type promptParams struct {
 }
 
 type promptEntry struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Data     string `json:"data,omitempty"`     // base64-encoded image data (for type=image)
+	MimeType string `json:"mimeType,omitempty"` // e.g. "image/jpeg" (for type=image)
 }
 
 type promptResult struct {
@@ -162,8 +165,11 @@ type codexTurnStartParams struct {
 }
 
 type codexUserInput struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type         string        `json:"type"`
+	Text         string        `json:"text,omitempty"`
+	TextElements []interface{} `json:"text_elements,omitempty"`
+	URL          string        `json:"url,omitempty"`
+	Detail       string        `json:"detail,omitempty"`
 }
 
 type codexTurnEvent struct {
@@ -459,6 +465,131 @@ func (a *ACPAgent) Chat(ctx context.Context, conversationID string, message stri
 	}
 }
 
+// buildPrompt constructs prompt entries from text and optional image.
+func (a *ACPAgent) buildPrompt(message string, image *ImageInput) []promptEntry {
+	var entries []promptEntry
+	if image != nil {
+		entries = append(entries, promptEntry{
+			Type:     "image",
+			Data:     base64.StdEncoding.EncodeToString(image.Data),
+			MimeType: image.MimeType,
+		})
+	}
+	if message != "" {
+		entries = append(entries, promptEntry{Type: "text", Text: message})
+	}
+	return entries
+}
+
+// ChatWithImage sends a message with an image to the agent.
+func (a *ACPAgent) ChatWithImage(ctx context.Context, conversationID string, message string, image *ImageInput) (string, error) {
+	if !a.started {
+		if err := a.Start(ctx); err != nil {
+			return "", err
+		}
+	}
+
+	if a.protocol == protocolCodexAppServer {
+		if image == nil || len(image.Data) == 0 {
+			return a.chatCodexAppServer(ctx, conversationID, message)
+		}
+		imageURL := fmt.Sprintf("data:%s;base64,%s", image.MimeType, base64.StdEncoding.EncodeToString(image.Data))
+		return a.chatCodexAppServerWithInput(ctx, conversationID, []codexUserInput{
+			{
+				Type:   "image",
+				URL:    imageURL,
+				Detail: "high",
+			},
+			{
+				Type:         "text",
+				Text:         message,
+				TextElements: []interface{}{},
+			},
+		})
+	}
+
+	sessionID, isNew, err := a.getOrCreateSession(ctx, conversationID)
+	if err != nil {
+		return "", fmt.Errorf("session error: %w", err)
+	}
+
+	pid := a.cmd.Process.Pid
+	if isNew {
+		log.Printf("[acp] new session created (pid=%d, session=%s, conversation=%s)", pid, sessionID, conversationID)
+	} else {
+		log.Printf("[acp] reusing session (pid=%d, session=%s, conversation=%s)", pid, sessionID, conversationID)
+	}
+
+	notifyCh := make(chan *sessionUpdate, 256)
+	a.notifyMu.Lock()
+	a.notifyCh[sessionID] = notifyCh
+	a.notifyMu.Unlock()
+	defer func() {
+		a.notifyMu.Lock()
+		delete(a.notifyCh, sessionID)
+		a.notifyMu.Unlock()
+	}()
+
+	prompt := a.buildPrompt(message, image)
+
+	type promptDoneMsg struct {
+		result json.RawMessage
+		err    error
+	}
+	promptDone := make(chan promptDoneMsg, 1)
+	go func() {
+		result, err := a.rpc(ctx, "session/prompt", promptParams{
+			SessionID: sessionID,
+			Prompt:    prompt,
+		})
+		if result != nil {
+			log.Printf("[acp] prompt result (session=%s): %s", sessionID, string(result))
+		}
+		promptDone <- promptDoneMsg{result: result, err: err}
+	}()
+
+	var textParts []string
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case update := <-notifyCh:
+			if update.SessionUpdate == "agent_message_chunk" {
+				text := extractChunkText(update)
+				if text != "" {
+					textParts = append(textParts, text)
+				}
+			}
+		case done := <-promptDone:
+			for {
+				select {
+				case update := <-notifyCh:
+					if update.SessionUpdate == "agent_message_chunk" {
+						text := extractChunkText(update)
+						if text != "" {
+							textParts = append(textParts, text)
+						}
+					}
+				default:
+					goto drained2
+				}
+			}
+		drained2:
+			if done.err != nil {
+				return "", fmt.Errorf("prompt error: %w", done.err)
+			}
+			result := strings.TrimSpace(strings.Join(textParts, ""))
+			if result == "" {
+				result = extractPromptResultText(done.result)
+			}
+			if result == "" {
+				return "", fmt.Errorf("agent returned empty response")
+			}
+			return result, nil
+		}
+	}
+}
+
 func (a *ACPAgent) getOrCreateSession(ctx context.Context, conversationID string) (string, bool, error) {
 	a.mu.Lock()
 	sid, exists := a.sessions[conversationID]
@@ -532,6 +663,14 @@ func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string)
 }
 
 func (a *ACPAgent) chatCodexAppServer(ctx context.Context, conversationID string, message string) (string, error) {
+	return a.chatCodexAppServerWithInput(ctx, conversationID, []codexUserInput{{
+		Type:         "text",
+		Text:         message,
+		TextElements: []interface{}{},
+	}})
+}
+
+func (a *ACPAgent) chatCodexAppServerWithInput(ctx context.Context, conversationID string, input []codexUserInput) (string, error) {
 	threadID, isNew, err := a.getOrCreateThread(ctx, conversationID)
 	if err != nil {
 		return "", fmt.Errorf("thread error: %w", err)
@@ -567,7 +706,7 @@ func (a *ACPAgent) chatCodexAppServer(ctx context.Context, conversationID string
 		_, err := a.rpc(ctx, "turn/start", codexTurnStartParams{
 			ThreadID:       threadID,
 			ApprovalPolicy: "never",
-			Input:          []codexUserInput{{Type: "text", Text: message}},
+			Input:          input,
 			SandboxPolicy:  map[string]interface{}{"type": "dangerFullAccess"},
 			Model:          a.model,
 			Cwd:            a.cwd,

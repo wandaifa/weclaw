@@ -93,3 +93,15 @@ type Agent interface {
 	// SetCwd changes the working directory for subsequent operations.
 	SetCwd(cwd string)
 }
+
+// ImageInput holds image data for multimodal chat.
+type ImageInput struct {
+	MimeType string
+	Data     []byte
+}
+
+// ImageChatAgent is implemented by agents that can process image input.
+type ImageChatAgent interface {
+	Agent
+	ChatWithImage(ctx context.Context, conversationID string, message string, image *ImageInput) (string, error)
+}
