@@ -31,7 +31,7 @@ func SendTypingState(ctx context.Context, client *ilink.Client, userID, contextT
 		return fmt.Errorf("send typing: %w", err)
 	}
 
-	log.Printf("[sender] sent typing indicator to %s", userID)
+	log.Printf("[sender] bot=%s sent typing indicator to %s", client.BotID(), userID)
 	return nil
 }
 
@@ -74,7 +74,7 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 		return fmt.Errorf("send message failed: ret=%d errmsg=%s", resp.Ret, resp.ErrMsg)
 	}
 
-	log.Printf("[sender] sent reply to %s: %q", toUserID, truncate(text, 50))
+	log.Printf("[sender] bot=%s sent reply to %s: %q", client.BotID(), toUserID, truncate(text, 50))
 	return nil
 }
 

@@ -53,12 +53,13 @@ func NewMonitor(client *Client, handler MessageHandler) (*Monitor, error) {
 // Run starts the long-poll loop. It blocks until ctx is cancelled.
 // Automatically recovers from errors with exponential backoff.
 func (m *Monitor) Run(ctx context.Context) error {
-	log.Println("[monitor] starting long-poll loop")
+	botID := m.client.BotID()
+	log.Printf("[monitor] bot=%s starting long-poll loop", botID)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[monitor] shutting down")
+			log.Printf("[monitor] bot=%s shutting down", botID)
 			return ctx.Err()
 		default:
 		}
@@ -70,10 +71,10 @@ func (m *Monitor) Run(ctx context.Context) error {
 			}
 			m.failures++
 			backoff := m.calcBackoff()
-			log.Printf("[monitor] GetUpdates error (%d/%d, backoff=%s): %v",
-				m.failures, maxConsecutiveFailures, backoff, err)
+			log.Printf("[monitor] bot=%s GetUpdates error (%d/%d, backoff=%s): %v",
+				botID, m.failures, maxConsecutiveFailures, backoff, err)
 			if m.failures == maxConsecutiveFailures {
-				log.Printf("[monitor] WARNING: %d consecutive failures. If this persists, run `weclaw login` to re-authenticate.", maxConsecutiveFailures)
+				log.Printf("[monitor] bot=%s WARNING: %d consecutive failures. If this persists, run `weclaw login` to re-authenticate.", botID, maxConsecutiveFailures)
 			}
 			select {
 			case <-time.After(backoff):
@@ -90,13 +91,13 @@ func (m *Monitor) Run(ctx context.Context) error {
 		// Session expired — reset sync buf and reconnect silently
 		if resp.ErrCode == errCodeSessionExpired {
 			if m.getUpdatesBuf != "" {
-				log.Printf("[monitor] session expired, resetting sync buf")
+				log.Printf("[monitor] bot=%s session expired, resetting sync buf", botID)
 				m.getUpdatesBuf = ""
 				m.saveBuf()
 			} else {
 				// Sync buf already empty but still getting session expired:
 				// the bot token itself has expired. The user needs to re-login.
-				log.Printf("[monitor] WARNING: WeChat session expired and cannot be auto-recovered. Run `weclaw login` to re-authenticate.")
+				log.Printf("[monitor] bot=%s WARNING: WeChat session expired and cannot be auto-recovered. Run `weclaw login` to re-authenticate.", botID)
 			}
 			select {
 			case <-time.After(sessionExpiredBackoff):
@@ -108,7 +109,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 
 		// Other server errors
 		if resp.Ret != 0 && resp.ErrCode != 0 {
-			log.Printf("[monitor] server error: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
+			log.Printf("[monitor] bot=%s server error: ret=%d errcode=%d errmsg=%s", botID, resp.Ret, resp.ErrCode, resp.ErrMsg)
 			continue
 		}
 

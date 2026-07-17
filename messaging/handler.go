@@ -259,6 +259,8 @@ func (h *Handler) parseCommand(text string) ([]string, string) {
 
 // HandleMessage processes a single incoming message.
 func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage) {
+	botID := client.BotID()
+
 	// Only process user messages that are finished
 	if msg.MessageType != ilink.MessageTypeUser {
 		return
@@ -282,7 +284,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	if text == "" {
 		if voiceText := extractVoiceText(msg); voiceText != "" {
 			text = voiceText
-			log.Printf("[handler] voice transcription from %s: %q", msg.FromUserID, truncate(text, 80))
+			log.Printf("[handler] bot=%s voice transcription from %s: %q", botID, msg.FromUserID, truncate(text, 80))
 		}
 	}
 	if text == "" {
@@ -291,11 +293,11 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 			h.handleImageMessage(ctx, client, msg, img)
 			return
 		}
-		log.Printf("[handler] received non-text message from %s, skipping", msg.FromUserID)
+		log.Printf("[handler] bot=%s received non-text message from %s, skipping", botID, msg.FromUserID)
 		return
 	}
 
-	log.Printf("[handler] received from %s: %q", msg.FromUserID, truncate(text, 80))
+	log.Printf("[handler] bot=%s received from %s: %q", botID, msg.FromUserID, truncate(text, 80))
 
 	// Store context token for this user
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
@@ -726,7 +728,8 @@ func extractVoiceText(msg ilink.WeixinMessage) string {
 // handleImageMessage downloads an image and forwards it to the agent for processing.
 func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, img *ilink.ImageItem) {
 	clientID := NewClientID()
-	log.Printf("[handler] received image from %s, downloading...", msg.FromUserID)
+	botID := client.BotID()
+	log.Printf("[handler] bot=%s received image from %s, downloading...", botID, msg.FromUserID)
 
 	var data []byte
 	var err error
@@ -735,16 +738,16 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 	} else if img.Media != nil && img.Media.EncryptQueryParam != "" {
 		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
 	} else {
-		log.Printf("[handler] image has no URL or media info from %s", msg.FromUserID)
+		log.Printf("[handler] bot=%s image has no URL or media info from %s", botID, msg.FromUserID)
 		return
 	}
 	if err != nil {
-		log.Printf("[handler] failed to download image from %s: %v", msg.FromUserID, err)
+		log.Printf("[handler] bot=%s failed to download image from %s: %v", botID, msg.FromUserID, err)
 		return
 	}
 
 	mimeType := detectImageMime(data)
-	log.Printf("[handler] downloaded image from %s (%d bytes, %s)", msg.FromUserID, len(data), mimeType)
+	log.Printf("[handler] bot=%s downloaded image from %s (%d bytes, %s)", botID, msg.FromUserID, len(data), mimeType)
 
 	if h.saveDir != "" {
 		go h.handleImageSave(ctx, client, msg, img)
@@ -760,13 +763,13 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 
 	ag := h.getDefaultAgent()
 	if ag == nil {
-		log.Printf("[handler] no agent ready, skipping image from %s", msg.FromUserID)
+		log.Printf("[handler] bot=%s no agent ready, skipping image from %s", botID, msg.FromUserID)
 		return
 	}
 
 	var reply string
 	if imgAgent, ok := ag.(agent.ImageChatAgent); ok {
-		log.Printf("[handler] sending image to agent via ChatWithImage for %s", msg.FromUserID)
+		log.Printf("[handler] bot=%s sending image to agent via ChatWithImage for %s", botID, msg.FromUserID)
 		reply, err = imgAgent.ChatWithImage(ctx, msg.FromUserID, "请识别并描述这张图片的内容。", &agent.ImageInput{
 			MimeType: mimeType,
 			Data:     data,
@@ -805,7 +808,8 @@ func detectImageMime(data []byte) string {
 
 func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, img *ilink.ImageItem) {
 	clientID := NewClientID()
-	log.Printf("[handler] received image from %s, saving to %s", msg.FromUserID, h.saveDir)
+	botID := client.BotID()
+	log.Printf("[handler] bot=%s received image from %s, saving to %s", botID, msg.FromUserID, h.saveDir)
 
 	// Download image data
 	var data []byte
@@ -818,12 +822,12 @@ func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg
 		// CDN encrypted download
 		data, err = DownloadFileFromCDN(ctx, img.Media.EncryptQueryParam, img.Media.AESKey)
 	} else {
-		log.Printf("[handler] image has no URL or media info from %s", msg.FromUserID)
+		log.Printf("[handler] bot=%s image has no URL or media info from %s", botID, msg.FromUserID)
 		return
 	}
 
 	if err != nil {
-		log.Printf("[handler] failed to download image from %s: %v", msg.FromUserID, err)
+		log.Printf("[handler] bot=%s failed to download image from %s: %v", botID, msg.FromUserID, err)
 		reply := fmt.Sprintf("Failed to save image: %v", err)
 		_ = SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
 		return
@@ -858,10 +862,10 @@ func (h *Handler) handleImageSave(ctx context.Context, client *ilink.Client, msg
 		log.Printf("[handler] failed to write sidecar: %v", err)
 	}
 
-	log.Printf("[handler] saved image to %s (%d bytes)", filePath, len(data))
+	log.Printf("[handler] bot=%s saved image from %s to %s (%d bytes)", botID, msg.FromUserID, filePath, len(data))
 	reply := fmt.Sprintf("Saved: %s", fileName)
 	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
-		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+		log.Printf("[handler] bot=%s failed to send reply to %s: %v", botID, msg.FromUserID, err)
 	}
 }
 

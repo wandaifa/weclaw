@@ -26,6 +26,13 @@ This repository is Liang's fork of `github.com/fastclaw-ai/weclaw` for personal 
    - `web/out/.keep`
    - Keeps Go embed buildable when the source tree has no built frontend output.
 
+4. Bot/user identity logging
+   - `messaging/handler.go`
+   - `messaging/sender.go`
+   - `ilink/monitor.go`
+   - Incoming text/image logs, outgoing reply/typing logs, and monitor warnings now include `bot=<bot_id>`.
+   - This lets `wx-clawbot` maintain exact `@im.bot` ↔ `@im.wechat` relationship records for new messages.
+
 ## Build
 
 ```bash
