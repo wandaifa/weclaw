@@ -150,12 +150,22 @@ func runStart(cmd *cobra.Command, args []string) error {
 			log.Println("No default agent configured, staying in echo mode")
 			return
 		}
-		log.Printf("Initializing default agent %q in background...", cfg.DefaultAgent)
-		ag := createAgentByName(ctx, cfg, cfg.DefaultAgent)
-		if ag == nil {
-			log.Printf("Failed to initialize default agent %q, staying in echo mode", cfg.DefaultAgent)
-		} else {
-			handler.SetDefaultAgent(cfg.DefaultAgent, ag)
+		for attempt := 1; ; attempt++ {
+			log.Printf("Initializing default agent %q in background (attempt %d)...", cfg.DefaultAgent, attempt)
+			ag := createAgentByName(ctx, cfg, cfg.DefaultAgent)
+			if ag != nil {
+				handler.SetDefaultAgent(cfg.DefaultAgent, ag)
+				return
+			}
+			log.Printf("Failed to initialize default agent %q, will retry in 30s", cfg.DefaultAgent)
+
+			timer := time.NewTimer(30 * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
 		}
 	}()
 

@@ -141,6 +141,50 @@ func TestBuildHelpText(t *testing.T) {
 	}
 }
 
+func TestAgentRecoveringReplyDoesNotEchoUserText(t *testing.T) {
+	reply := agentRecoveringReply()
+	if reply == "" {
+		t.Fatal("recovery reply is empty")
+	}
+	if strings.Contains(reply, "[echo]") {
+		t.Fatalf("recovery reply should not use echo mode: %q", reply)
+	}
+	if strings.Contains(reply, "帮我生成图片") {
+		t.Fatalf("recovery reply should not include user text: %q", reply)
+	}
+}
+
+func TestTryBeginChatBlocksSameAgentAndUser(t *testing.T) {
+	h := newTestHandler()
+	wait, ok := h.tryBeginChat("codex", "user-1")
+	if !ok {
+		t.Fatalf("first chat should start, wait=%s", wait)
+	}
+
+	wait, ok = h.tryBeginChat("codex", "user-1")
+	if ok {
+		t.Fatal("second chat for same agent and user should be blocked")
+	}
+	if wait < 0 {
+		t.Fatalf("wait should not be negative: %s", wait)
+	}
+
+	h.endChat("codex", "user-1")
+	if _, ok = h.tryBeginChat("codex", "user-1"); !ok {
+		t.Fatal("chat should start after previous chat ends")
+	}
+}
+
+func TestTryBeginChatAllowsDifferentUsers(t *testing.T) {
+	h := newTestHandler()
+	if _, ok := h.tryBeginChat("codex", "user-1"); !ok {
+		t.Fatal("first user should start")
+	}
+	if _, ok := h.tryBeginChat("codex", "user-2"); !ok {
+		t.Fatal("different user should start independently")
+	}
+}
+
 func TestSaveInboundImage(t *testing.T) {
 	dir := t.TempDir()
 	data := []byte{0x89, 0x50, 0x4E, 0x47, 1, 2, 3}

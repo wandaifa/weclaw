@@ -43,6 +43,7 @@ type Handler struct {
 	saveDir       string   // directory to save images/files to
 	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
 	pendingMedia  sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
+	activeChats   sync.Map // map[agentName|userID]time.Time — prevent overlapping turns in the same thread
 }
 
 type pendingMedia struct {
@@ -458,6 +459,14 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 	defaultName := h.defaultName
 	h.mu.RUnlock()
 
+	wait, ok := h.tryBeginChat(defaultName, msg.FromUserID)
+	if !ok {
+		log.Printf("[handler] default agent %q is busy for %s, sending busy notice", defaultName, msg.FromUserID)
+		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
+		return
+	}
+	defer h.endChat(defaultName, msg.FromUserID)
+
 	ag := h.getDefaultAgent()
 	var reply string
 	if ag != nil {
@@ -467,15 +476,56 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 			reply = fmt.Sprintf("Error: %v", err)
 		}
 	} else {
-		log.Printf("[handler] agent not ready, using echo mode for %s", msg.FromUserID)
-		reply = "[echo] " + text
+		log.Printf("[handler] agent not ready, sending recovery notice to %s", msg.FromUserID)
+		reply = agentRecoveringReply()
 	}
 
 	h.sendReplyWithMedia(ctx, client, msg, defaultName, reply, clientID)
 }
 
+func agentRecoveringReply() string {
+	return "系统正在恢复中，请稍后重试。"
+}
+
+func agentBusyReply(wait time.Duration) string {
+	if wait < 0 {
+		wait = 0
+	}
+	seconds := int(wait.Round(time.Second).Seconds())
+	if seconds < 1 {
+		seconds = 1
+	}
+	return fmt.Sprintf("上一条消息还在处理中，已经等了 %d 秒。图片生成和长任务会慢一些，请等当前回复完成后再发新需求。", seconds)
+}
+
+func (h *Handler) tryBeginChat(agentName, userID string) (time.Duration, bool) {
+	key := agentName + "|" + userID
+	now := time.Now()
+	value, loaded := h.activeChats.LoadOrStore(key, now)
+	if !loaded {
+		return 0, true
+	}
+	started, ok := value.(time.Time)
+	if !ok {
+		return 0, false
+	}
+	return now.Sub(started), false
+}
+
+func (h *Handler) endChat(agentName, userID string) {
+	h.activeChats.Delete(agentName + "|" + userID)
+}
+
 // sendToNamedAgent sends the message to a specific agent and replies.
 func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, name, message, clientID string) {
+	wait, ok := h.tryBeginChat(name, msg.FromUserID)
+	if !ok {
+		log.Printf("[handler] agent %q is busy for %s, sending busy notice", name, msg.FromUserID)
+		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
+		return
+	}
+	defer h.endChat(name, msg.FromUserID)
+
 	ag, agErr := h.getAgent(ctx, name)
 	if agErr != nil {
 		log.Printf("[handler] agent %q not available: %v", name, agErr)
