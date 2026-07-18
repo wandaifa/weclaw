@@ -304,6 +304,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		// Clean up old entries periodically (fire-and-forget)
 		go h.cleanSeenMsgs()
 	}
+	logMessageMeta(botID, msg)
 
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
@@ -743,6 +744,87 @@ func extractText(msg ilink.WeixinMessage) string {
 		}
 	}
 	return ""
+}
+
+func logMessageMeta(botID string, msg ilink.WeixinMessage) {
+	var itemTypes []string
+	var fileName string
+	var fileLen string
+	var voicePlaytime int
+	for _, item := range msg.ItemList {
+		itemTypes = append(itemTypes, itemTypeName(item.Type))
+		if item.Type == ilink.ItemTypeFile && item.FileItem != nil {
+			fileName = item.FileItem.FileName
+			fileLen = item.FileItem.Len
+		}
+		if item.Type == ilink.ItemTypeVoice && item.VoiceItem != nil {
+			voicePlaytime = item.VoiceItem.Playtime
+		}
+	}
+	log.Printf("[handler] meta bot=%s message_id=%d from=%s to=%s type=%s state=%s items=%s context=%s file_name=%q file_len=%q voice_playtime=%d",
+		botID,
+		msg.MessageID,
+		msg.FromUserID,
+		msg.ToUserID,
+		messageTypeName(msg.MessageType),
+		messageStateName(msg.MessageState),
+		strings.Join(itemTypes, ","),
+		shortToken(msg.ContextToken),
+		fileName,
+		fileLen,
+		voicePlaytime,
+	)
+}
+
+func messageTypeName(t int) string {
+	switch t {
+	case ilink.MessageTypeUser:
+		return "user"
+	case ilink.MessageTypeBot:
+		return "bot"
+	default:
+		return fmt.Sprintf("%d", t)
+	}
+}
+
+func messageStateName(state int) string {
+	switch state {
+	case ilink.MessageStateNew:
+		return "new"
+	case ilink.MessageStateGenerating:
+		return "generating"
+	case ilink.MessageStateFinish:
+		return "finish"
+	default:
+		return fmt.Sprintf("%d", state)
+	}
+}
+
+func itemTypeName(t int) string {
+	switch t {
+	case ilink.ItemTypeText:
+		return "text"
+	case ilink.ItemTypeImage:
+		return "image"
+	case ilink.ItemTypeVoice:
+		return "voice"
+	case ilink.ItemTypeFile:
+		return "file"
+	case ilink.ItemTypeVideo:
+		return "video"
+	default:
+		return fmt.Sprintf("%d", t)
+	}
+}
+
+func shortToken(token string) string {
+	if token == "" {
+		return ""
+	}
+	if len(token) <= 14 {
+		return token
+	}
+	return token[:6] + "..." + token[len(token)-6:]
 }
 
 func extractImage(msg ilink.WeixinMessage) *ilink.ImageItem {

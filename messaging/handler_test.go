@@ -225,6 +225,18 @@ func TestWithPendingMediaContextConsumesOnce(t *testing.T) {
 	}
 }
 
+func TestMessageMetaHelpers(t *testing.T) {
+	if got := messageStateName(2); got != "finish" {
+		t.Fatalf("messageStateName(2) = %q, want finish", got)
+	}
+	if got := itemTypeName(4); got != "file" {
+		t.Fatalf("itemTypeName(4) = %q, want file", got)
+	}
+	if got := shortToken("1234567890abcdef"); got != "123456...abcdef" {
+		t.Fatalf("shortToken() = %q, want masked token", got)
+	}
+}
+
 func TestSafeInboundMediaNameAddsVideoExt(t *testing.T) {
 	got := safeInboundMediaName("", "video", "video/mp4")
 	if got != "video.mp4" {
