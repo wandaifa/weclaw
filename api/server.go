@@ -6,16 +6,32 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
+	"sync"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
 )
 
+const AccountReloadPath = "/api/internal/accounts/reload"
+
+// AccountReloadResult describes the accounts active after a reload.
+type AccountReloadResult struct {
+	Clients  []*ilink.Client
+	Added    int
+	Replaced int
+}
+
+// AccountReloader refreshes credentials and starts monitors for changed accounts.
+type AccountReloader func(context.Context) (AccountReloadResult, error)
+
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	clients []*ilink.Client
-	addr    string
+	mu       sync.RWMutex
+	clients  []*ilink.Client
+	reloader AccountReloader
+	addr     string
 }
 
 // NewServer creates an API server.
@@ -24,6 +40,13 @@ func NewServer(clients []*ilink.Client, addr string) *Server {
 		addr = "127.0.0.1:18011"
 	}
 	return &Server{clients: clients, addr: addr}
+}
+
+// SetAccountReloader enables hot-loading credentials through the local API.
+func (s *Server) SetAccountReloader(reloader AccountReloader) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reloader = reloader
 }
 
 // SendRequest is the JSON body for POST /api/send.
@@ -38,6 +61,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/send", s.handleSend)
+	mux.HandleFunc(AccountReloadPath, s.handleAccountReload)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -62,14 +86,15 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	clients := s.clientsSnapshot()
 	data := struct {
 		Addr         string
 		AccountCount int
 		HasAccounts  bool
 	}{
 		Addr:         s.addr,
-		AccountCount: len(s.clients),
-		HasAccounts:  len(s.clients) > 0,
+		AccountCount: len(clients),
+		HasAccounts:  len(clients) > 0,
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := indexTemplate.Execute(w, data); err != nil {
@@ -98,13 +123,14 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(s.clients) == 0 {
+	clients := s.clientsSnapshot()
+	if len(clients) == 0 {
 		http.Error(w, "no accounts configured", http.StatusServiceUnavailable)
 		return
 	}
 
 	// Use the first client
-	client := s.clients[0]
+	client := clients[0]
 	ctx := r.Context()
 
 	// Send text if provided
@@ -138,6 +164,59 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleAccountReload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+
+	s.mu.RLock()
+	reloader := s.reloader
+	s.mu.RUnlock()
+	if reloader == nil {
+		http.Error(w, "account reload is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	result, err := reloader(r.Context())
+	if err != nil {
+		log.Printf("[api] account reload failed: %v", err)
+		http.Error(w, "account reload failed", http.StatusInternalServerError)
+		return
+	}
+
+	s.mu.Lock()
+	s.clients = append([]*ilink.Client(nil), result.Clients...)
+	s.mu.Unlock()
+
+	log.Printf("[api] accounts reloaded: total=%d added=%d replaced=%d", len(result.Clients), result.Added, result.Replaced)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{
+		"accounts": len(result.Clients),
+		"added":    result.Added,
+		"replaced": result.Replaced,
+	})
+}
+
+func (s *Server) clientsSnapshot() []*ilink.Client {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]*ilink.Client(nil), s.clients...)
+}
+
+func isLoopbackRequest(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>

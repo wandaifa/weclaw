@@ -33,6 +33,16 @@ This repository is Liang's fork of `github.com/fastclaw-ai/weclaw` for personal 
    - Incoming text/image logs, outgoing reply/typing logs, and monitor warnings now include `bot=<bot_id>`.
    - This lets `wx-clawbot` maintain exact `@im.bot` ↔ `@im.wechat` relationship records for new messages.
 
+5. Account hot reload after login
+   - `cmd/login.go`
+   - `cmd/account_manager.go`
+   - `cmd/start.go`
+   - `api/server.go`
+   - `weclaw login` now asks the running local service to load saved credentials immediately.
+   - New accounts start one monitor without restarting agents or existing account monitors.
+   - Repeated reloads are idempotent, and changed credentials replace the matching bot monitor.
+   - The internal reload endpoint only accepts loopback requests.
+
 ## Build
 
 ```bash

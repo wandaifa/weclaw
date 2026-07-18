@@ -179,36 +179,42 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
-	// Start HTTP API server for sending messages
-	var clients []*ilink.Client
-	for _, c := range accounts {
-		clients = append(clients, ilink.NewClient(c))
+	// Start account monitors and expose hot reload through the local API.
+	log.Printf("Starting message bridge for %d account(s)...", len(accounts))
+	accountManager := newAccountManager(ctx, handler)
+	initialAccounts, err := accountManager.Reload(accounts)
+	if err != nil {
+		return fmt.Errorf("start account monitors: %w", err)
 	}
+
 	// Resolve API addr: flag > env/config > default
 	apiAddr := cfg.APIAddr // already includes env override from loadEnv
 	if apiAddrFlag != "" {
 		apiAddr = apiAddrFlag
 	}
-	apiServer := api.NewServer(clients, apiAddr)
+	apiServer := api.NewServer(initialAccounts.Clients, apiAddr)
+	apiServer.SetAccountReloader(func(context.Context) (api.AccountReloadResult, error) {
+		credentials, err := ilink.LoadAllCredentials()
+		if err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		result, err := accountManager.Reload(credentials)
+		if err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		return api.AccountReloadResult{
+			Clients:  result.Clients,
+			Added:    result.Added,
+			Replaced: result.Replaced,
+		}, nil
+	})
 	go func() {
 		if err := apiServer.Run(ctx); err != nil {
 			log.Printf("API server error: %v", err)
 		}
 	}()
 
-	// Start monitors immediately — they will use echo mode until agent is ready
-	log.Printf("Starting message bridge for %d account(s)...", len(accounts))
-
-	var wg sync.WaitGroup
-	for _, creds := range accounts {
-		wg.Add(1)
-		go func(c *ilink.Credentials) {
-			defer wg.Done()
-			runMonitorWithRestart(ctx, c, handler)
-		}(creds)
-	}
-
-	wg.Wait()
+	accountManager.Wait()
 	log.Println("All monitors stopped")
 	return nil
 }
