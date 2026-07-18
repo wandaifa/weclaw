@@ -86,10 +86,31 @@ func TestAgentConfigWithoutEnvStillLoads(t *testing.T) {
 	}
 }
 
-func TestDefaultConfigInitializesAgentsMap(t *testing.T) {
+func TestDefaultConfigInitializesMaps(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg.Agents == nil {
 		t.Fatal("DefaultConfig() Agents = nil, want initialized map")
+	}
+	if cfg.UserAgents == nil {
+		t.Fatal("DefaultConfig() UserAgents = nil, want initialized map")
+	}
+}
+
+func TestConfigUserAgentsRoundTrip(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.UserAgents["user-1"] = "claude"
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+
+	var decoded Config
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if got := decoded.UserAgents["user-1"]; got != "claude" {
+		t.Fatalf("UserAgents[user-1] = %q, want claude", got)
 	}
 }
 

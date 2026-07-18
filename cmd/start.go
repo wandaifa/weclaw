@@ -51,6 +51,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 				return fmt.Errorf("login failed: %w", err)
 			}
 		}
+		if launchAgentInstalled() {
+			return startLaunchAgent()
+		}
 		return runDaemon()
 	}
 
@@ -104,15 +107,22 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create handler with an agent factory for on-demand agent creation
+	var configMu sync.Mutex
 	handler := messaging.NewHandler(
 		func(ctx context.Context, name string) agent.Agent {
 			return createAgentByName(ctx, cfg, name)
 		},
-		func(name string) error {
-			cfg.DefaultAgent = name
+		func(userID, name string) error {
+			configMu.Lock()
+			defer configMu.Unlock()
+			if cfg.UserAgents == nil {
+				cfg.UserAgents = make(map[string]string)
+			}
+			cfg.UserAgents[userID] = name
 			return config.Save(cfg)
 		},
 	)
+	handler.SetUserAgents(cfg.UserAgents)
 
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
@@ -372,6 +382,9 @@ func writePid(pid int) error {
 
 // runDaemon spawns weclaw start (without --daemon) as a background process.
 func runDaemon() error {
+	if launchAgentInstalled() {
+		return startLaunchAgent()
+	}
 	// Kill any existing weclaw processes before starting a new one
 	stopAllWeclaw()
 

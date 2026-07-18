@@ -14,6 +14,10 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Check if weclaw is running in background",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if launchAgentInstalled() {
+			printLaunchAgentStatus()
+			return nil
+		}
 		pid, err := readPid()
 		if err != nil {
 			fmt.Println("weclaw is not running")

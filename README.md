@@ -28,6 +28,12 @@ That's it. On first start, WeClaw will:
 
 Use `weclaw login` to add additional WeChat accounts.
 
+### macOS LaunchAgent
+
+When `~/Library/LaunchAgents/ai.weclaw.bridge.plist` is installed, `weclaw start`,
+`restart`, `stop`, and `status` delegate to launchd instead of creating a second
+background process. Without that LaunchAgent, the original daemon behavior is used.
+
 ### Other install methods
 
 ```bash
@@ -60,10 +66,10 @@ Send these as WeChat messages:
 
 | Command | Description |
 |---------|-------------|
-| `hello` | Send to default agent |
+| `hello` | Send to the current user's selected agent |
 | `/codex write a function` | Send to a specific agent |
 | `/cc explain this code` | Send to agent by alias |
-| `/claude` | Switch default agent to Claude |
+| `/claude` | Switch the current WeChat user to Claude |
 | `/cwd /path/to/project` | Switch workspace directory |
 | `/new` | Start a new conversation (clear session) |
 | `/info` | Show current agent info |
@@ -96,7 +102,7 @@ You can also define custom aliases per agent in config:
 
 Then `/ai hello` or `/c hello` will route to claude.
 
-Switching default agent is persisted to config — survives restarts.
+Each WeChat user's selected agent is persisted independently and survives restarts.
 
 ## Media Messages
 
@@ -158,6 +164,9 @@ Config file: `~/.weclaw/config.json`
 ```json
 {
   "default_agent": "claude",
+  "user_agents": {
+    "user-id@im.wechat": "codex"
+  },
   "agents": {
     "claude": {
       "type": "acp",

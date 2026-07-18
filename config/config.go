@@ -11,6 +11,7 @@ import (
 // Config holds the application configuration.
 type Config struct {
 	DefaultAgent string                 `json:"default_agent"`
+	UserAgents   map[string]string      `json:"user_agents,omitempty"`
 	APIAddr      string                 `json:"api_addr,omitempty"`
 	SaveDir      string                 `json:"save_dir,omitempty"`
 	Agents       map[string]AgentConfig `json:"agents"`
@@ -67,7 +68,8 @@ func BuildAliasMap(agents map[string]AgentConfig) map[string]string {
 // DefaultConfig returns an empty configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		Agents: make(map[string]AgentConfig),
+		UserAgents: make(map[string]string),
+		Agents:     make(map[string]AgentConfig),
 	}
 }
 
@@ -103,6 +105,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.Agents == nil {
 		cfg.Agents = make(map[string]AgentConfig)
+	}
+	if cfg.UserAgents == nil {
+		cfg.UserAgents = make(map[string]string)
 	}
 
 	loadEnv(cfg)

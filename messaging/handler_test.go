@@ -1,6 +1,7 @@
 package messaging
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +11,10 @@ import (
 )
 
 func newTestHandler() *Handler {
-	return &Handler{agents: make(map[string]agent.Agent)}
+	return &Handler{
+		agents:     make(map[string]agent.Agent),
+		userAgents: make(map[string]string),
+	}
 }
 
 func TestParseCommand_NoPrefix(t *testing.T) {
@@ -154,34 +158,103 @@ func TestAgentRecoveringReplyDoesNotEchoUserText(t *testing.T) {
 	}
 }
 
-func TestTryBeginChatBlocksSameAgentAndUser(t *testing.T) {
+func TestTryBeginChatBlocksSameUser(t *testing.T) {
 	h := newTestHandler()
-	wait, ok := h.tryBeginChat("codex", "user-1")
+	wait, ok := h.tryBeginChat("user-1")
 	if !ok {
 		t.Fatalf("first chat should start, wait=%s", wait)
 	}
 
-	wait, ok = h.tryBeginChat("codex", "user-1")
+	wait, ok = h.tryBeginChat("user-1")
 	if ok {
-		t.Fatal("second chat for same agent and user should be blocked")
+		t.Fatal("second chat for same user should be blocked")
 	}
 	if wait < 0 {
 		t.Fatalf("wait should not be negative: %s", wait)
 	}
 
-	h.endChat("codex", "user-1")
-	if _, ok = h.tryBeginChat("codex", "user-1"); !ok {
+	h.endChat("user-1")
+	if _, ok = h.tryBeginChat("user-1"); !ok {
 		t.Fatal("chat should start after previous chat ends")
 	}
 }
 
 func TestTryBeginChatAllowsDifferentUsers(t *testing.T) {
 	h := newTestHandler()
-	if _, ok := h.tryBeginChat("codex", "user-1"); !ok {
+	if _, ok := h.tryBeginChat("user-1"); !ok {
 		t.Fatal("first user should start")
 	}
-	if _, ok := h.tryBeginChat("codex", "user-2"); !ok {
+	if _, ok := h.tryBeginChat("user-2"); !ok {
 		t.Fatal("different user should start independently")
+	}
+}
+
+func TestAgentFailureReplyClassifiesClaudeErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "session limit", err: fmt.Errorf("You've hit your session limit"), want: "额度"},
+		{name: "login", err: fmt.Errorf("OAuth login expired"), want: "登录状态"},
+		{name: "startup", err: fmt.Errorf("start claude: executable file not found"), want: "启动失败"},
+		{name: "generic", err: fmt.Errorf("unexpected EOF"), want: "处理失败"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reply := agentFailureReply("claude", tt.err)
+			if !strings.Contains(reply, tt.want) {
+				t.Fatalf("reply %q does not contain %q", reply, tt.want)
+			}
+			if strings.Contains(reply, tt.err.Error()) {
+				t.Fatalf("reply should not expose raw error: %q", reply)
+			}
+		})
+	}
+}
+
+func TestUserAgentSelectionsAreIndependent(t *testing.T) {
+	h := newTestHandler()
+	h.defaultName = "codex"
+	h.SetUserAgents(map[string]string{
+		"user-1": "claude",
+		"user-2": "codex",
+	})
+
+	if name, _, selected := h.selectedAgent("user-1"); name != "claude" || !selected {
+		t.Fatalf("user-1 selection = %q, selected=%v; want claude, true", name, selected)
+	}
+	if name, _, selected := h.selectedAgent("user-2"); name != "codex" || !selected {
+		t.Fatalf("user-2 selection = %q, selected=%v; want codex, true", name, selected)
+	}
+	if name, _, selected := h.selectedAgent("user-3"); name != "codex" || selected {
+		t.Fatalf("user-3 selection = %q, selected=%v; want codex fallback, false", name, selected)
+	}
+}
+
+func TestClaudeImageGenerationRedirect(t *testing.T) {
+	requests := []string{
+		"帮我生成一只银渐层小猫的图片",
+		"生成一个儿童饰品海报",
+		"帮我画一只猫",
+		"generate an image of a cat",
+	}
+	for _, request := range requests {
+		if !shouldRedirectClaudeImageGeneration("claude", request) {
+			t.Fatalf("Claude request should redirect: %q", request)
+		}
+	}
+
+	if shouldRedirectClaudeImageGeneration("codex", requests[0]) {
+		t.Fatal("Codex image request should not redirect")
+	}
+	if shouldRedirectClaudeImageGeneration("claude", "分析图片里的商品") {
+		t.Fatal("image analysis request should not redirect")
+	}
+
+	reply := claudeImageGenerationReply()
+	if !strings.Contains(reply, "/codex") || !strings.Contains(reply, "重新发送") {
+		t.Fatalf("redirect reply should include switch command and next step: %q", reply)
 	}
 }
 

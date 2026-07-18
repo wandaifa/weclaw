@@ -18,8 +18,8 @@ import (
 // AgentFactory creates an agent by config name. Returns nil if the name is unknown.
 type AgentFactory func(ctx context.Context, name string) agent.Agent
 
-// SaveDefaultFunc persists the default agent name to config file.
-type SaveDefaultFunc func(name string) error
+// SaveUserAgentFunc persists one user's selected agent to the config file.
+type SaveUserAgentFunc func(userID, name string) error
 
 // AgentMeta holds static config info about an agent (for /status display).
 type AgentMeta struct {
@@ -33,17 +33,18 @@ type AgentMeta struct {
 type Handler struct {
 	mu            sync.RWMutex
 	defaultName   string
+	userAgents    map[string]string      // user ID -> selected agent; falls back to defaultName
 	agents        map[string]agent.Agent // name -> running agent
 	agentMetas    []AgentMeta            // all configured agents (for /status)
 	agentWorkDirs map[string]string      // agent name -> configured/runtime cwd
 	customAliases map[string]string      // custom alias -> agent name (from config)
 	factory       AgentFactory
-	saveDefault   SaveDefaultFunc
+	saveUserAgent SaveUserAgentFunc
 	contextTokens sync.Map // map[userID]contextToken
 	saveDir       string   // directory to save images/files to
 	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
 	pendingMedia  sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
-	activeChats   sync.Map // map[agentName|userID]time.Time — prevent overlapping turns in the same thread
+	activeChats   sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
 }
 
 type pendingMedia struct {
@@ -53,12 +54,13 @@ type pendingMedia struct {
 }
 
 // NewHandler creates a new message handler.
-func NewHandler(factory AgentFactory, saveDefault SaveDefaultFunc) *Handler {
+func NewHandler(factory AgentFactory, saveUserAgent SaveUserAgentFunc) *Handler {
 	return &Handler{
 		agents:        make(map[string]agent.Agent),
+		userAgents:    make(map[string]string),
 		agentWorkDirs: make(map[string]string),
 		factory:       factory,
-		saveDefault:   saveDefault,
+		saveUserAgent: saveUserAgent,
 	}
 }
 
@@ -131,6 +133,18 @@ func (h *Handler) SetDefaultAgent(name string, ag agent.Agent) {
 	log.Printf("[handler] default agent ready: %s (%s)", name, ag.Info())
 }
 
+// SetUserAgents restores persisted per-user agent selections.
+func (h *Handler) SetUserAgents(selections map[string]string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.userAgents = make(map[string]string, len(selections))
+	for userID, name := range selections {
+		if userID != "" && name != "" {
+			h.userAgents[userID] = name
+		}
+	}
+}
+
 // getAgent returns a running agent by name, or starts it on demand via factory.
 func (h *Handler) getAgent(ctx context.Context, name string) (agent.Agent, error) {
 	// Fast path: already running
@@ -165,14 +179,15 @@ func (h *Handler) getAgent(ctx context.Context, name string) (agent.Agent, error
 	return ag, nil
 }
 
-// getDefaultAgent returns the default agent (may be nil if not ready yet).
-func (h *Handler) getDefaultAgent() agent.Agent {
+// selectedAgent returns the agent selected by this user, falling back to the global default.
+func (h *Handler) selectedAgent(userID string) (string, agent.Agent, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	if h.defaultName == "" {
-		return nil
+	name, selected := h.userAgents[userID]
+	if !selected {
+		name = h.defaultName
 	}
-	return h.agents[h.defaultName]
+	return name, h.agents[name], selected
 }
 
 // isKnownAgent checks if a name corresponds to a configured agent.
@@ -364,7 +379,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 
 	// Built-in commands (no typing needed)
 	if trimmed == "/info" {
-		reply := h.buildStatus()
+		reply := h.buildStatus(msg.FromUserID)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
@@ -382,7 +397,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		}
 		return
 	} else if strings.HasPrefix(trimmed, "/cwd") {
-		reply := h.handleCwd(trimmed)
+		reply := h.handleCwd(trimmed, msg.FromUserID)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
@@ -390,7 +405,6 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	}
 
 	// Route: "/agentname message" or "@agent1 @agent2 message" -> specific agent(s)
-	text = h.withPendingMediaContext(msg.FromUserID, text)
 	agentNames, message := h.parseCommand(text)
 
 	// No command prefix -> send to default agent
@@ -402,7 +416,16 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	// No message -> switch default agent (only first name)
 	if message == "" {
 		if len(agentNames) == 1 && h.isKnownAgent(agentNames[0]) {
-			reply := h.switchDefault(ctx, agentNames[0])
+			wait, ok := h.tryBeginChat(msg.FromUserID)
+			if !ok {
+				reply := agentBusyReply(wait)
+				if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+					log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+				}
+				return
+			}
+			reply := h.switchUserAgent(ctx, msg.FromUserID, agentNames[0])
+			h.endChat(msg.FromUserID)
 			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 			}
@@ -455,32 +478,45 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 		}
 	}()
 
-	h.mu.RLock()
-	defaultName := h.defaultName
-	h.mu.RUnlock()
+	agentName, ag, selected := h.selectedAgent(msg.FromUserID)
 
-	wait, ok := h.tryBeginChat(defaultName, msg.FromUserID)
+	wait, ok := h.tryBeginChat(msg.FromUserID)
 	if !ok {
-		log.Printf("[handler] default agent %q is busy for %s, sending busy notice", defaultName, msg.FromUserID)
+		log.Printf("[handler] selected agent %q is busy for %s, sending busy notice", agentName, msg.FromUserID)
 		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
 		return
 	}
-	defer h.endChat(defaultName, msg.FromUserID)
+	defer h.endChat(msg.FromUserID)
 
-	ag := h.getDefaultAgent()
+	if shouldRedirectClaudeImageGeneration(agentName, text) {
+		SendTextReply(ctx, client, msg.FromUserID, claudeImageGenerationReply(), msg.ContextToken, clientID)
+		return
+	}
+
+	if ag == nil && selected {
+		var err error
+		ag, err = h.getAgent(ctx, agentName)
+		if err != nil {
+			log.Printf("[handler] selected agent %q not available: %v", agentName, err)
+			SendTextReply(ctx, client, msg.FromUserID, agentFailureReply(agentName, err), msg.ContextToken, clientID)
+			return
+		}
+	}
+
+	text = h.withPendingMediaContext(msg.FromUserID, text)
 	var reply string
 	if ag != nil {
 		var err error
 		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, text)
 		if err != nil {
-			reply = fmt.Sprintf("Error: %v", err)
+			reply = agentFailureReply(agentName, err)
 		}
 	} else {
 		log.Printf("[handler] agent not ready, sending recovery notice to %s", msg.FromUserID)
 		reply = agentRecoveringReply()
 	}
 
-	h.sendReplyWithMedia(ctx, client, msg, defaultName, reply, clientID)
+	h.sendReplyWithMedia(ctx, client, msg, agentName, reply, clientID)
 }
 
 func agentRecoveringReply() string {
@@ -498,10 +534,74 @@ func agentBusyReply(wait time.Duration) string {
 	return fmt.Sprintf("上一条消息还在处理中，已经等了 %d 秒。图片生成和长任务会慢一些，请等当前回复完成后再发新需求。", seconds)
 }
 
-func (h *Handler) tryBeginChat(agentName, userID string) (time.Duration, bool) {
-	key := agentName + "|" + userID
+func agentFailureReply(agentName string, err error) string {
+	name := strings.TrimSpace(agentName)
+	if name == "" {
+		name = "当前模型"
+	}
+	detail := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(detail, "session limit"), strings.Contains(detail, "usage limit"), strings.Contains(detail, "rate limit"):
+		if strings.EqualFold(name, "claude") {
+			return "Claude 当前额度或频率已达限制，请稍后重试，或发送 /codex 切换到 Codex。"
+		}
+		return fmt.Sprintf("%s 当前额度或频率已达限制，请稍后重试。", name)
+	case strings.Contains(detail, "auth"), strings.Contains(detail, "login"), strings.Contains(detail, "oauth"):
+		return fmt.Sprintf("%s 登录状态异常，请在电脑端重新登录后再试。", name)
+	case strings.Contains(detail, "no such file"), strings.Contains(detail, "executable file not found"),
+		strings.Contains(detail, "start "+strings.ToLower(name)+":"):
+		return fmt.Sprintf("%s 本机进程启动失败，系统会在下一条消息时重新尝试。", name)
+	default:
+		return fmt.Sprintf("%s 本次处理失败，系统会在下一条消息时重新尝试。", name)
+	}
+}
+
+func shouldRedirectClaudeImageGeneration(agentName, text string) bool {
+	if !strings.EqualFold(strings.TrimSpace(agentName), "claude") {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	exclusions := []string{
+		"分析图片", "识别图片", "描述图片", "图片是怎么生成", "如何生成图片",
+	}
+	for _, phrase := range exclusions {
+		if strings.Contains(normalized, phrase) {
+			return false
+		}
+	}
+	if strings.Contains(normalized, "生图") {
+		return true
+	}
+	imageNouns := []string{"图", "照片", "海报", "插画", "头像", "壁纸"}
+	for _, noun := range imageNouns {
+		if strings.Contains(normalized, noun) &&
+			(strings.Contains(normalized, "生成") || strings.Contains(normalized, "做一")) {
+			return true
+		}
+	}
+	drawPhrases := []string{"帮我画", "给我画", "画一张", "画一幅", "画个"}
+	for _, phrase := range drawPhrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	hasEnglishVerb := strings.Contains(normalized, "generate") ||
+		strings.Contains(normalized, "create") ||
+		strings.Contains(normalized, "draw")
+	hasEnglishImage := strings.Contains(normalized, "image") ||
+		strings.Contains(normalized, "picture") ||
+		strings.Contains(normalized, "photo") ||
+		strings.Contains(normalized, "illustration")
+	return hasEnglishVerb && hasEnglishImage
+}
+
+func claudeImageGenerationReply() string {
+	return "Claude 当前不支持生成图片。请发送 /codex 切换到 Codex，然后重新发送生图需求。"
+}
+
+func (h *Handler) tryBeginChat(userID string) (time.Duration, bool) {
 	now := time.Now()
-	value, loaded := h.activeChats.LoadOrStore(key, now)
+	value, loaded := h.activeChats.LoadOrStore(userID, now)
 	if !loaded {
 		return 0, true
 	}
@@ -512,31 +612,37 @@ func (h *Handler) tryBeginChat(agentName, userID string) (time.Duration, bool) {
 	return now.Sub(started), false
 }
 
-func (h *Handler) endChat(agentName, userID string) {
-	h.activeChats.Delete(agentName + "|" + userID)
+func (h *Handler) endChat(userID string) {
+	h.activeChats.Delete(userID)
 }
 
 // sendToNamedAgent sends the message to a specific agent and replies.
 func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, name, message, clientID string) {
-	wait, ok := h.tryBeginChat(name, msg.FromUserID)
+	wait, ok := h.tryBeginChat(msg.FromUserID)
 	if !ok {
 		log.Printf("[handler] agent %q is busy for %s, sending busy notice", name, msg.FromUserID)
 		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
 		return
 	}
-	defer h.endChat(name, msg.FromUserID)
+	defer h.endChat(msg.FromUserID)
 
+	if shouldRedirectClaudeImageGeneration(name, message) {
+		SendTextReply(ctx, client, msg.FromUserID, claudeImageGenerationReply(), msg.ContextToken, clientID)
+		return
+	}
+
+	message = h.withPendingMediaContext(msg.FromUserID, message)
 	ag, agErr := h.getAgent(ctx, name)
 	if agErr != nil {
 		log.Printf("[handler] agent %q not available: %v", name, agErr)
-		reply := fmt.Sprintf("Agent %q is not available: %v", name, agErr)
+		reply := agentFailureReply(name, agErr)
 		SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID)
 		return
 	}
 
 	reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
 	if err != nil {
-		reply = fmt.Sprintf("Error: %v", err)
+		reply = agentFailureReply(name, err)
 	}
 	h.sendReplyWithMedia(ctx, client, msg, name, reply, clientID)
 }
@@ -544,6 +650,15 @@ func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, ms
 // broadcastToAgents sends the message to multiple agents in parallel.
 // Each reply is sent as a separate message with the agent name prefix.
 func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, names []string, message string) {
+	wait, ok := h.tryBeginChat(msg.FromUserID)
+	if !ok {
+		log.Printf("[handler] broadcast is busy for %s, sending busy notice", msg.FromUserID)
+		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, NewClientID())
+		return
+	}
+	defer h.endChat(msg.FromUserID)
+
+	message = h.withPendingMediaContext(msg.FromUserID, message)
 	type result struct {
 		name  string
 		reply string
@@ -555,12 +670,12 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 		go func(n string) {
 			ag, err := h.getAgent(ctx, n)
 			if err != nil {
-				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
+				ch <- result{name: n, reply: agentFailureReply(n, err)}
 				return
 			}
 			reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
 			if err != nil {
-				ch <- result{name: n, reply: fmt.Sprintf("Error: %v", err)}
+				ch <- result{name: n, reply: agentFailureReply(n, err)}
 				return
 			}
 			ch <- result{name: n, reply: reply}
@@ -646,61 +761,69 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 	return reply, nil
 }
 
-// switchDefault switches the default agent. Starts it on demand if needed.
-// The change is persisted to config file.
-func (h *Handler) switchDefault(ctx context.Context, name string) string {
+// switchUserAgent selects an agent for one user and persists that selection.
+func (h *Handler) switchUserAgent(ctx context.Context, userID, name string) string {
 	ag, err := h.getAgent(ctx, name)
 	if err != nil {
-		log.Printf("[handler] failed to switch default to %q: %v", name, err)
-		return fmt.Sprintf("Failed to switch to %q: %v", name, err)
+		log.Printf("[handler] failed to switch %s to %q: %v", userID, name, err)
+		return agentFailureReply(name, err)
 	}
 
 	h.mu.Lock()
 	old := h.defaultName
-	h.defaultName = name
+	if selected, ok := h.userAgents[userID]; ok {
+		old = selected
+	}
+	h.userAgents[userID] = name
 	h.agents[name] = ag
 	h.mu.Unlock()
 
-	// Persist to config file
-	if h.saveDefault != nil {
-		if err := h.saveDefault(name); err != nil {
-			log.Printf("[handler] failed to save default agent to config: %v", err)
+	if h.saveUserAgent != nil {
+		if err := h.saveUserAgent(userID, name); err != nil {
+			log.Printf("[handler] failed to save agent %q for %s: %v", name, userID, err)
 		} else {
-			log.Printf("[handler] saved default agent %q to config", name)
+			log.Printf("[handler] saved agent %q for %s", name, userID)
 		}
 	}
 
 	info := ag.Info()
-	log.Printf("[handler] switched default agent: %s -> %s (%s)", old, name, info)
-	return fmt.Sprintf("switch to %s", name)
+	log.Printf("[handler] switched agent for %s: %s -> %s (%s)", userID, old, name, info)
+	return fmt.Sprintf("已切换到 %s，仅对当前微信用户生效。", name)
 }
 
-// resetDefaultSession resets the session for the given userID on the default agent.
+// resetDefaultSession resets the session for the agent selected by this user.
 func (h *Handler) resetDefaultSession(ctx context.Context, userID string) string {
-	ag := h.getDefaultAgent()
+	name, ag, selected := h.selectedAgent(userID)
+	if ag == nil && selected {
+		var err error
+		ag, err = h.getAgent(ctx, name)
+		if err != nil {
+			return agentFailureReply(name, err)
+		}
+	}
 	if ag == nil {
 		return "No agent running."
 	}
-	name := ag.Info().Name
+	displayName := ag.Info().Name
 	sessionID, err := ag.ResetSession(ctx, userID)
 	if err != nil {
 		log.Printf("[handler] reset session failed for %s: %v", userID, err)
-		return fmt.Sprintf("Failed to reset session: %v", err)
+		return agentFailureReply(name, err)
 	}
 	if sessionID != "" {
-		return fmt.Sprintf("已创建新的%s会话\n%s", name, sessionID)
+		return fmt.Sprintf("已创建新的%s会话\n%s", displayName, sessionID)
 	}
-	return fmt.Sprintf("已创建新的%s会话", name)
+	return fmt.Sprintf("已创建新的%s会话", displayName)
 }
 
 // handleCwd handles the /cwd command. It updates the working directory for all running agents.
-func (h *Handler) handleCwd(trimmed string) string {
+func (h *Handler) handleCwd(trimmed, userID string) string {
 	arg := strings.TrimSpace(strings.TrimPrefix(trimmed, "/cwd"))
 	if arg == "" {
-		// No path provided — show current cwd of default agent
-		ag := h.getDefaultAgent()
+		// No path provided — show cwd info for this user's selected agent.
+		name, ag, _ := h.selectedAgent(userID)
 		if ag == nil {
-			return "No agent running."
+			return fmt.Sprintf("agent: %s (not started)", name)
 		}
 		info := ag.Info()
 		return fmt.Sprintf("cwd: (check agent config)\nagent: %s", info.Name)
@@ -756,27 +879,31 @@ func (h *Handler) handleCwd(trimmed string) string {
 	return fmt.Sprintf("cwd: %s", absPath)
 }
 
-// buildStatus returns a short status string showing the current default agent.
-func (h *Handler) buildStatus() string {
+// buildStatus returns a short status string showing this user's selected agent.
+func (h *Handler) buildStatus(userID string) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	if h.defaultName == "" {
+	name := h.defaultName
+	if selected, ok := h.userAgents[userID]; ok {
+		name = selected
+	}
+	if name == "" {
 		return "agent: none (echo mode)"
 	}
 
-	ag, ok := h.agents[h.defaultName]
+	ag, ok := h.agents[name]
 	if !ok {
-		return fmt.Sprintf("agent: %s (not started)", h.defaultName)
+		return fmt.Sprintf("agent: %s (not started)", name)
 	}
 
 	info := ag.Info()
-	return fmt.Sprintf("agent: %s\ntype: %s\nmodel: %s", h.defaultName, info.Type, info.Model)
+	return fmt.Sprintf("agent: %s\ntype: %s\nmodel: %s", name, info.Type, info.Model)
 }
 
 func buildHelpText() string {
 	return `Available commands:
-@agent or /agent - Switch default agent
+@agent or /agent - Switch agent for the current WeChat user
 @agent msg or /agent msg - Send to a specific agent
 @a @b msg - Broadcast to multiple agents
 /new or /clear - Start a new session
@@ -947,15 +1074,32 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
 
+	wait, ok := h.tryBeginChat(msg.FromUserID)
+	if !ok {
+		log.Printf("[handler] image handling is busy for %s, sending busy notice", msg.FromUserID)
+		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
+		return
+	}
+	defer h.endChat(msg.FromUserID)
+
 	go func() {
 		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
 			log.Printf("[handler] failed to send typing state: %v", typingErr)
 		}
 	}()
 
-	ag := h.getDefaultAgent()
+	agentName, ag, selected := h.selectedAgent(msg.FromUserID)
+	if ag == nil && selected {
+		ag, err = h.getAgent(ctx, agentName)
+		if err != nil {
+			log.Printf("[handler] bot=%s selected agent %q not available for image from %s: %v", botID, agentName, msg.FromUserID, err)
+			SendTextReply(ctx, client, msg.FromUserID, agentFailureReply(agentName, err), msg.ContextToken, clientID)
+			return
+		}
+	}
 	if ag == nil {
-		log.Printf("[handler] bot=%s no agent ready, skipping image from %s", botID, msg.FromUserID)
+		log.Printf("[handler] bot=%s no agent ready, sending recovery notice for image from %s", botID, msg.FromUserID)
+		SendTextReply(ctx, client, msg.FromUserID, agentRecoveringReply(), msg.ContextToken, clientID)
 		return
 	}
 
@@ -970,12 +1114,9 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, "[用户发送了一张图片，但当前 agent 不支持图片处理]")
 	}
 	if err != nil {
-		reply = fmt.Sprintf("Error: %v", err)
+		reply = agentFailureReply(agentName, err)
 	}
 
-	h.mu.RLock()
-	agentName := h.defaultName
-	h.mu.RUnlock()
 	h.sendReplyWithMedia(ctx, client, msg, agentName, reply, clientID)
 }
 

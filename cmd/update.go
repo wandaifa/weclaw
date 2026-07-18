@@ -15,7 +15,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const githubRepo = "fastclaw-ai/weclaw"
+const githubRepo = "wandaifa/weclaw"
 
 func init() {
 	rootCmd.AddCommand(updateCmd)
@@ -94,6 +94,14 @@ func runUpdate(cmd *cobra.Command, args []string) error {
 	fmt.Printf("Updated to %s\n", latest)
 
 	// 4. Restart if running in background
+	if launchAgentInstalled() {
+		if err := restartLaunchAgent(); err != nil {
+			log.Printf("Failed to restart launchd service: %v", err)
+			fmt.Println("Update complete. Run 'weclaw restart' after fixing the launchd service.")
+		}
+		return nil
+	}
+
 	pid, pidErr := readPid()
 	if pidErr == nil && processExists(pid) {
 		fmt.Println("Stopping old process...")

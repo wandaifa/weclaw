@@ -17,6 +17,9 @@ var restartCmd = &cobra.Command{
 	Use:   "restart",
 	Short: "Restart the background weclaw process",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if launchAgentInstalled() {
+			return restartLaunchAgent()
+		}
 		// Stop if running
 		pid, err := readPid()
 		if err == nil && processExists(pid) {
