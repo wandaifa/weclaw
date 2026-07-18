@@ -14,7 +14,7 @@ WeChat AI Agent Bridge — connect WeChat to AI agents (Claude, Codex, Gemini, K
 
 ```bash
 # One-line install
-curl -sSL https://raw.githubusercontent.com/fastclaw-ai/weclaw/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/wandaifa/weclaw/main/install.sh | sh
 
 # Start (first run will prompt QR code login)
 weclaw start
@@ -37,11 +37,10 @@ background process. Without that LaunchAgent, the original daemon behavior is us
 ### Other install methods
 
 ```bash
-# Via Go
-go install github.com/fastclaw-ai/weclaw@latest
-
-# Via Docker
-docker run -it -v ~/.weclaw:/root/.weclaw ghcr.io/fastclaw-ai/weclaw start
+# Build this fork from source
+git clone https://github.com/wandaifa/weclaw.git
+cd weclaw
+go build -o weclaw .
 ```
 
 ## How It Works
@@ -268,9 +267,12 @@ Logs are written to `~/.weclaw/weclaw.log`.
 
 **macOS (launchd):**
 
+The bundled plist is a template. Update its binary path, working directory,
+home directory, and log paths for the target Mac before loading it.
+
 ```bash
-cp service/com.fastclaw.weclaw.plist ~/Library/LaunchAgents/
-launchctl load ~/Library/LaunchAgents/com.fastclaw.weclaw.plist
+cp launchd/ai.weclaw.bridge.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.weclaw.bridge.plist
 ```
 
 **Linux (systemd):**
@@ -307,12 +309,13 @@ docker logs -f weclaw
 ## Release
 
 ```bash
-# Tag a new version to trigger GitHub Actions build & release
-git tag v0.1.0
-git push origin v0.1.0
+# Tag a release candidate
+git tag v0.8.1-rc.1
+git push origin v0.8.1-rc.1
 ```
 
 The workflow builds binaries for `darwin/linux/windows` x `amd64/arm64`, creates a GitHub Release, and uploads all artifacts with checksums.
+Tags containing a suffix such as `-rc.1` are published as pre-releases.
 
 ## Update
 
