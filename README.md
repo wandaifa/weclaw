@@ -312,6 +312,9 @@ docker logs -f weclaw
 # Tag a release candidate
 git tag v0.8.1-rc.1
 git push origin v0.8.1-rc.1
+
+# Manual fallback when a fork does not trigger tag workflows
+gh workflow run Release --ref main -f tag=v0.8.1-rc.1
 ```
 
 The workflow builds binaries for `darwin/linux/windows` x `amd64/arm64`, creates a GitHub Release, and uploads all artifacts with checksums.

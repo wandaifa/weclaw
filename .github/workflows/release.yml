@@ -1,12 +1,21 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v* tag to release
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
 
 permissions:
   contents: write
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   build:
@@ -29,10 +38,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
 
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+
+      - name: Validate release tag
+        run: |
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "Release tag must start with v"; exit 1 ;;
+          esac
 
       - name: Build
         env:
@@ -42,7 +60,7 @@ jobs:
         run: |
           EXT=""
           if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
-          go build -trimpath -ldflags="-s -w -X github.com/fastclaw-ai/weclaw/cmd.Version=${{ github.ref_name }}" \
+          go build -trimpath -ldflags="-s -w -X github.com/fastclaw-ai/weclaw/cmd.Version=${RELEASE_TAG}" \
             -o weclaw_${{ matrix.goos }}_${{ matrix.goarch }}${EXT} .
 
       - uses: actions/upload-artifact@v4
@@ -66,8 +84,9 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           generate_release_notes: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
           files: |
             dist/weclaw_*
             dist/checksums.txt
