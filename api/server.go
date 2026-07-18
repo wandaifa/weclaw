@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 
@@ -35,6 +36,7 @@ type SendRequest struct {
 // Run starts the HTTP server. Blocks until ctx is cancelled.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -53,6 +55,26 @@ func (s *Server) Run(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	data := struct {
+		Addr         string
+		AccountCount int
+		HasAccounts  bool
+	}{
+		Addr:         s.addr,
+		AccountCount: len(s.clients),
+		HasAccounts:  len(s.clients) > 0,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := indexTemplate.Execute(w, data); err != nil {
+		log.Printf("[api] render index failed: %v", err)
+	}
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -117,3 +139,35 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
+
+var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WeClaw API</title>
+<style>
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111b21;color:#e9edef;font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.card{width:min(680px,calc(100vw - 32px));background:#202c33;border:1px solid #2a3942;border-radius:8px;padding:24px;box-shadow:0 18px 48px #0006}.top{display:flex;align-items:center;gap:10px;margin-bottom:18px}.dot{width:10px;height:10px;border-radius:50%;background:#00a884;box-shadow:0 0 0 4px #00a88422}h1{font-size:22px;line-height:1.2;margin:0}.muted{color:#8696a0}.status{display:inline-flex;align-items:center;gap:8px;margin:8px 0 20px;padding:7px 11px;border-radius:999px;background:#12372f;color:#8df4cf;font-weight:600}.warn{background:#3a2d16;color:#ffd98b}.grid{display:grid;grid-template-columns:130px 1fr;gap:8px 14px;margin:18px 0}.key{color:#8696a0}.value{word-break:break-all}code{font-family:"SFMono-Regular",Consolas,monospace;background:#111b21;border:1px solid #2a3942;border-radius:5px;padding:2px 6px}.endpoints{display:grid;gap:10px;margin-top:18px}.endpoint{padding:12px;border-radius:6px;background:#111b21;border:1px solid #2a3942}.method{display:inline-block;min-width:46px;margin-right:8px;color:#00a884;font-weight:700}.hint{margin-top:18px;color:#8696a0;font-size:13px}
+</style>
+</head>
+<body>
+<main class="card">
+  <div class="top"><span class="dot"></span><h1>WeClaw API 服务</h1></div>
+  {{if .HasAccounts}}
+  <div class="status">服务已启动，微信账号已加载</div>
+  {{else}}
+  <div class="status warn">服务已启动，但还没有可用微信账号</div>
+  {{end}}
+  <div class="grid">
+    <div class="key">监听地址</div><div class="value"><code>{{.Addr}}</code></div>
+    <div class="key">微信账号数</div><div class="value">{{.AccountCount}}</div>
+    <div class="key">健康检查</div><div class="value"><a style="color:#8df4cf" href="/health">/health</a></div>
+  </div>
+  <div class="endpoints">
+    <div class="endpoint"><span class="method">GET</span><code>/health</code><div class="muted">返回 ok，表示 API 服务在线。</div></div>
+    <div class="endpoint"><span class="method">POST</span><code>/api/send</code><div class="muted">发送微信文字、图片、视频或文件消息。</div></div>
+  </div>
+  <div class="hint">聊天记录查看页在 <code>http://127.0.0.1:18022/</code>，这里是 WeClaw 主服务 API。</div>
+</main>
+</body>
+</html>`))
