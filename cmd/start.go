@@ -57,6 +57,12 @@ func runStart(cmd *cobra.Command, args []string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	if err := writePid(os.Getpid()); err != nil {
+		log.Printf("Warning: failed to write pid file: %v", err)
+	} else {
+		defer os.Remove(pidFile())
+	}
+
 	// Load all accounts
 	accounts, err := ilink.LoadAllCredentials()
 	if err != nil {
@@ -347,6 +353,13 @@ func logFile() string {
 	return filepath.Join(weclawDir(), "weclaw.log")
 }
 
+func writePid(pid int) error {
+	if err := os.MkdirAll(weclawDir(), 0o700); err != nil {
+		return fmt.Errorf("create weclaw dir: %w", err)
+	}
+	return os.WriteFile(pidFile(), []byte(fmt.Sprintf("%d", pid)), 0o644)
+}
+
 // runDaemon spawns weclaw start (without --daemon) as a background process.
 func runDaemon() error {
 	// Kill any existing weclaw processes before starting a new one
@@ -381,7 +394,11 @@ func runDaemon() error {
 
 	// Save PID
 	pid := cmd.Process.Pid
-	os.WriteFile(pidFile(), []byte(fmt.Sprintf("%d", pid)), 0o644)
+	if err := writePid(pid); err != nil {
+		_ = cmd.Process.Kill()
+		lf.Close()
+		return err
+	}
 
 	// Detach — don't wait
 	cmd.Process.Release()
