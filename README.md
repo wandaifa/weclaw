@@ -121,16 +121,16 @@ Send messages to WeChat users without waiting for them to message first.
 
 ```bash
 # Send text
-weclaw send --to "user_id@im.wechat" --text "Hello from weclaw"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --text "Hello from weclaw"
 
 # Send image
-weclaw send --to "user_id@im.wechat" --media "https://example.com/photo.png"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --media "https://example.com/photo.png"
 
 # Send text + image
-weclaw send --to "user_id@im.wechat" --text "Check this out" --media "https://example.com/photo.png"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --text "Check this out" --media "https://example.com/photo.png"
 
 # Send file
-weclaw send --to "user_id@im.wechat" --media "https://example.com/report.pdf"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --media "https://example.com/report.pdf"
 ```
 
 **HTTP API** (runs on `127.0.0.1:18011` when `weclaw start` is running):
@@ -139,18 +139,20 @@ weclaw send --to "user_id@im.wechat" --media "https://example.com/report.pdf"
 # Send text
 curl -X POST http://127.0.0.1:18011/api/send \
   -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "text": "Hello from weclaw"}'
+  -d '{"bot_id": "bot_id@im.bot", "to": "user_id@im.wechat", "text": "Hello from weclaw"}'
 
 # Send image
 curl -X POST http://127.0.0.1:18011/api/send \
   -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "media_url": "https://example.com/photo.png"}'
+  -d '{"bot_id": "bot_id@im.bot", "to": "user_id@im.wechat", "media_url": "https://example.com/photo.png"}'
 
 # Send text + media
 curl -X POST http://127.0.0.1:18011/api/send \
   -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "text": "See this", "media_url": "https://example.com/photo.png"}'
+  -d '{"bot_id": "bot_id@im.bot", "to": "user_id@im.wechat", "text": "See this", "media_url": "https://example.com/photo.png"}'
 ```
+
+When multiple WeChat accounts are configured, `bot_id` / `--bot` is required. It remains optional for a single account.
 
 Supported media types: images (png, jpg, gif, webp), videos (mp4, mov), files (pdf, doc, zip, etc.).
 

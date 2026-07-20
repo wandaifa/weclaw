@@ -14,9 +14,9 @@ import (
 )
 
 const (
-	defaultBaseURL     = "https://ilinkai.weixin.qq.com"
-	longPollTimeout    = 35 * time.Second
-	sendTimeout        = 15 * time.Second
+	defaultBaseURL  = "https://ilinkai.weixin.qq.com"
+	longPollTimeout = 35 * time.Second
+	sendTimeout     = 15 * time.Second
 )
 
 // Client is an iLink HTTP API client.
@@ -55,6 +55,27 @@ func NewUnauthenticatedClient() *Client {
 // BotID returns the bot's user ID.
 func (c *Client) BotID() string {
 	return c.botID
+}
+
+// SelectClient returns the requested bot client. A single configured account
+// remains backwards compatible when botID is omitted; multiple accounts must
+// always be selected explicitly to prevent sending from the wrong Bot.
+func SelectClient(clients []*Client, botID string) (*Client, error) {
+	if len(clients) == 0 {
+		return nil, fmt.Errorf("no accounts configured")
+	}
+	if botID == "" {
+		if len(clients) == 1 {
+			return clients[0], nil
+		}
+		return nil, fmt.Errorf("bot_id is required when multiple accounts are configured")
+	}
+	for _, client := range clients {
+		if client != nil && client.BotID() == botID {
+			return client, nil
+		}
+	}
+	return nil, fmt.Errorf("bot_id %q is not configured", botID)
 }
 
 // GetUpdates performs a long-poll for new messages.

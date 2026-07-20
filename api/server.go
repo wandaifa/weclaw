@@ -51,6 +51,7 @@ func (s *Server) SetAccountReloader(reloader AccountReloader) {
 
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
+	BotID    string `json:"bot_id,omitempty"`
 	To       string `json:"to"`
 	Text     string `json:"text,omitempty"`
 	MediaURL string `json:"media_url,omitempty"` // image/video/file URL
@@ -129,8 +130,11 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use the first client
-	client := clients[0]
+	client, err := ilink.SelectClient(clients, req.BotID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	ctx := r.Context()
 
 	// Send text if provided
@@ -244,7 +248,7 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
   </div>
   <div class="endpoints">
     <div class="endpoint"><span class="method">GET</span><code>/health</code><div class="muted">返回 ok，表示 API 服务在线。</div></div>
-    <div class="endpoint"><span class="method">POST</span><code>/api/send</code><div class="muted">发送微信文字、图片、视频或文件消息。</div></div>
+    <div class="endpoint"><span class="method">POST</span><code>/api/send</code><div class="muted">发送微信文字、图片、视频或文件消息；多账号时请求体必须提供 bot_id。</div></div>
   </div>
   <div class="hint">聊天记录查看页在 <code>http://127.0.0.1:18022/</code>，这里是 WeClaw 主服务 API。</div>
 </main>

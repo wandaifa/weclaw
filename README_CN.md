@@ -117,16 +117,16 @@ WeClaw 支持收发图片、视频、文件和语音消息。
 
 ```bash
 # 发送文本
-weclaw send --to "user_id@im.wechat" --text "你好，来自 weclaw"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --text "你好，来自 weclaw"
 
 # 发送图片
-weclaw send --to "user_id@im.wechat" --media "https://example.com/photo.png"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --media "https://example.com/photo.png"
 
 # 发送文本 + 图片
-weclaw send --to "user_id@im.wechat" --text "看看这个" --media "https://example.com/photo.png"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --text "看看这个" --media "https://example.com/photo.png"
 
 # 发送文件
-weclaw send --to "user_id@im.wechat" --media "https://example.com/report.pdf"
+weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --media "https://example.com/report.pdf"
 ```
 
 **HTTP API**（`weclaw start` 运行时，默认监听 `127.0.0.1:18011`）：
@@ -135,18 +135,20 @@ weclaw send --to "user_id@im.wechat" --media "https://example.com/report.pdf"
 # 发送文本
 curl -X POST http://127.0.0.1:18011/api/send \
   -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "text": "你好，来自 weclaw"}'
+  -d '{"bot_id": "bot_id@im.bot", "to": "user_id@im.wechat", "text": "你好，来自 weclaw"}'
 
 # 发送图片
 curl -X POST http://127.0.0.1:18011/api/send \
   -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "media_url": "https://example.com/photo.png"}'
+  -d '{"bot_id": "bot_id@im.bot", "to": "user_id@im.wechat", "media_url": "https://example.com/photo.png"}'
 
 # 发送文本 + 媒体
 curl -X POST http://127.0.0.1:18011/api/send \
   -H "Content-Type: application/json" \
-  -d '{"to": "user_id@im.wechat", "text": "看看这个", "media_url": "https://example.com/photo.png"}'
+  -d '{"bot_id": "bot_id@im.bot", "to": "user_id@im.wechat", "text": "看看这个", "media_url": "https://example.com/photo.png"}'
 ```
+
+配置多个微信账号时，`bot_id` 必填；单账号运行时可省略，兼容原有调用。命令行发送同理：`weclaw send --bot "bot_id@im.bot" --to "user_id@im.wechat" --text "你好"`。
 
 支持的媒体类型：图片（png、jpg、gif、webp）、视频（mp4、mov）、文件（pdf、doc、zip 等）。
 

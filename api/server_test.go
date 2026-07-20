@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,35 @@ import (
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 )
+
+func TestHandleSendRequiresBotIDForMultipleAccounts(t *testing.T) {
+	server := NewServer([]*ilink.Client{
+		ilink.NewClient(&ilink.Credentials{ILinkBotID: "first@im.bot"}),
+		ilink.NewClient(&ilink.Credentials{ILinkBotID: "second@im.bot"}),
+	}, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewBufferString(`{"to":"user@im.wechat","text":"hello"}`))
+	rec := httptest.NewRecorder()
+	server.handleSend(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleSendRejectsUnknownBotID(t *testing.T) {
+	server := NewServer([]*ilink.Client{
+		ilink.NewClient(&ilink.Credentials{ILinkBotID: "known@im.bot"}),
+	}, "")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewBufferString(`{"bot_id":"missing@im.bot","to":"user@im.wechat","text":"hello"}`))
+	rec := httptest.NewRecorder()
+	server.handleSend(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
 
 func TestHandleAccountReloadUpdatesClients(t *testing.T) {
 	server := NewServer(nil, "")
