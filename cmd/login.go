@@ -15,8 +15,12 @@ import (
 
 	"github.com/fastclaw-ai/weclaw/api"
 	"github.com/fastclaw-ai/weclaw/config"
+	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/fastclaw-ai/weclaw/messaging"
 	"github.com/spf13/cobra"
 )
+
+const loginWelcomeText = "已登录成功，微信 ClawBot 已上线。直接发消息即可开始对话。"
 
 func init() {
 	rootCmd.AddCommand(loginCmd)
@@ -107,4 +111,15 @@ func localAPIURL(addr, path string) (string, error) {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String(), nil
+}
+
+func sendLoginWelcome(ctx context.Context, creds *ilink.Credentials) error {
+	if creds.ILinkUserID == "" {
+		return fmt.Errorf("login did not return the scanner's WeChat user ID")
+	}
+	if err := messaging.SendTextReply(ctx, ilink.NewClient(creds), creds.ILinkUserID, loginWelcomeText, "", ""); err != nil {
+		return err
+	}
+	fmt.Println("Login welcome message sent.")
+	return nil
 }

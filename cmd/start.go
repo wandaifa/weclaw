@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -239,6 +240,10 @@ func runMonitorWithRestart(ctx context.Context, creds *ilink.Credentials, handle
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, ilink.ErrSessionExpired) {
+			log.Printf("[%s] Monitor stopped because its WeChat session expired; other accounts remain online.", creds.ILinkBotID)
+			return
+		}
 
 		log.Printf("[%s] Monitor stopped: %v, restarting in %s", creds.ILinkBotID, err, restartDelay)
 		select {
@@ -356,6 +361,9 @@ func doLogin(ctx context.Context) (*ilink.Credentials, error) {
 
 	if err := ilink.SaveCredentials(creds); err != nil {
 		return nil, fmt.Errorf("failed to save credentials: %w", err)
+	}
+	if err := sendLoginWelcome(ctx, creds); err != nil {
+		log.Printf("Login welcome message failed for %s: %v", creds.ILinkBotID, err)
 	}
 
 	dir, _ := ilink.CredentialsPath()

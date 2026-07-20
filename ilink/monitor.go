@@ -3,6 +3,7 @@ package ilink
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -10,11 +11,13 @@ import (
 	"time"
 )
 
+// ErrSessionExpired means the bot credential is no longer valid and requires login.
+var ErrSessionExpired = errors.New("wechat session expired")
+
 const (
 	maxConsecutiveFailures = 5
 	initialBackoff         = 3 * time.Second
 	maxBackoff             = 60 * time.Second
-	sessionExpiredBackoff  = 5 * time.Second
 	errCodeSessionExpired  = -14
 )
 
@@ -88,23 +91,18 @@ func (m *Monitor) Run(ctx context.Context) error {
 		m.failures = 0
 		m.lastActivity = time.Now()
 
-		// Session expired — reset sync buf and reconnect silently
+		// Session expired — reset a stale sync buf once, then stop this account.
 		if resp.ErrCode == errCodeSessionExpired {
 			if m.getUpdatesBuf != "" {
 				log.Printf("[monitor] bot=%s session expired, resetting sync buf", botID)
 				m.getUpdatesBuf = ""
 				m.saveBuf()
-			} else {
-				// Sync buf already empty but still getting session expired:
-				// the bot token itself has expired. The user needs to re-login.
-				log.Printf("[monitor] bot=%s WARNING: WeChat session expired and cannot be auto-recovered. Run `weclaw login` to re-authenticate.", botID)
+				continue
 			}
-			select {
-			case <-time.After(sessionExpiredBackoff):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			continue
+			// Sync buf already empty and the server still returns session expired:
+			// the credential itself is invalid. Do not hammer the API in a retry loop.
+			log.Printf("[monitor] bot=%s WARNING: WeChat session expired and cannot be auto-recovered; monitoring stopped. Run `weclaw login` to re-authenticate.", botID)
+			return fmt.Errorf("%w: bot=%s", ErrSessionExpired, botID)
 		}
 
 		// Other server errors
