@@ -6,8 +6,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/fastclaw-ai/weclaw/ilink"
 )
 
 func newTestHandler() *Handler {
@@ -186,24 +188,43 @@ func TestChatQueueProcessesOneConversationInOrder(t *testing.T) {
 	done := make(chan struct{})
 	var order []string
 
-	if queued, _ := h.enqueueChat("bot\x00user", func() {
+	if queued, _ := h.enqueueChat("bot\x00user", chatJob{run: func() {
 		order = append(order, "first")
 		close(started)
 		<-release
-	}); !queued {
+	}}); !queued {
 		t.Fatal("first message was not queued")
 	}
 	<-started
-	if queued, _ := h.enqueueChat("bot\x00user", func() {
+	if queued, _ := h.enqueueChat("bot\x00user", chatJob{run: func() {
 		order = append(order, "second")
 		close(done)
-	}); !queued {
+	}}); !queued {
 		t.Fatal("second message was not queued")
 	}
 	close(release)
 	<-done
 	if got := strings.Join(order, ","); got != "first,second" {
 		t.Fatalf("order = %q, want first,second", got)
+	}
+}
+
+func TestMergeQueuedTextCombinesConsecutiveMessages(t *testing.T) {
+	h := newTestHandler()
+	if err := h.SetMergeSettings(MergeSettings{IdleDelay: time.Second, MaxWait: 2 * time.Second, MaxMessages: 10, MaxChars: 4000}); err != nil {
+		t.Fatal(err)
+	}
+	first := chatJob{msg: ilink.WeixinMessage{FromUserID: "user", ContextToken: "first", ItemList: []ilink.MessageItem{{Type: ilink.ItemTypeText, TextItem: &ilink.TextItem{Text: "第一句"}}}}, text: "第一句", mergeable: true}
+	second := chatJob{msg: ilink.WeixinMessage{FromUserID: "user", ContextToken: "second", ItemList: []ilink.MessageItem{{Type: ilink.ItemTypeText, TextItem: &ilink.TextItem{Text: "第二句"}}}}, text: "第二句", mergeable: true}
+	queue := &chatQueue{jobs: []chatJob{second}, wake: make(chan struct{}, 1)}
+	queue.wake <- struct{}{}
+
+	merged := h.mergeQueuedText(queue, first)
+	if got := extractText(merged.msg); got != "第一句\n第二句" {
+		t.Fatalf("merged text = %q", got)
+	}
+	if merged.msg.ContextToken != "second" {
+		t.Fatalf("context token = %q, want second", merged.msg.ContextToken)
 	}
 }
 

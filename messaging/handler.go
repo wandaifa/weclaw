@@ -46,6 +46,8 @@ type Handler struct {
 	pendingMedia  sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
 	activeChats   sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
 	chatQueues    sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
+	mergeMu       sync.RWMutex
+	mergeSettings MergeSettings
 }
 
 type pendingMedia struct {
@@ -56,11 +58,34 @@ type pendingMedia struct {
 
 const maxQueuedMessages = 20
 
+// MergeSettings controls how consecutive plain-text messages become one turn.
+type MergeSettings struct {
+	IdleDelay   time.Duration
+	MaxWait     time.Duration
+	MaxMessages int
+	MaxChars    int
+}
+
+// DefaultMergeSettings keeps normal typing pauses together without delaying a request forever.
+func DefaultMergeSettings() MergeSettings {
+	return MergeSettings{IdleDelay: 3 * time.Second, MaxWait: 10 * time.Second, MaxMessages: 10, MaxChars: 4000}
+}
+
 type chatQueue struct {
 	mu               sync.Mutex
-	jobs             []func()
+	jobs             []chatJob
+	wake             chan struct{}
 	running          bool
 	overloadNotified bool
+}
+
+type chatJob struct {
+	ctx       context.Context
+	client    *ilink.Client
+	msg       ilink.WeixinMessage
+	text      string
+	mergeable bool
+	run       func()
 }
 
 // NewHandler creates a new message handler.
@@ -71,7 +96,35 @@ func NewHandler(factory AgentFactory, saveUserAgent SaveUserAgentFunc) *Handler 
 		agentWorkDirs: make(map[string]string),
 		factory:       factory,
 		saveUserAgent: saveUserAgent,
+		mergeSettings: DefaultMergeSettings(),
 	}
+}
+
+// SetMergeSettings updates consecutive-message merging for new queued turns.
+func (h *Handler) SetMergeSettings(settings MergeSettings) error {
+	if settings.IdleDelay < time.Second || settings.IdleDelay > 30*time.Second {
+		return fmt.Errorf("idle delay must be between 1 and 30 seconds")
+	}
+	if settings.MaxWait < settings.IdleDelay || settings.MaxWait > time.Minute {
+		return fmt.Errorf("max wait must be between idle delay and 60 seconds")
+	}
+	if settings.MaxMessages < 1 || settings.MaxMessages > maxQueuedMessages {
+		return fmt.Errorf("max messages must be between 1 and %d", maxQueuedMessages)
+	}
+	if settings.MaxChars < 100 || settings.MaxChars > 12000 {
+		return fmt.Errorf("max chars must be between 100 and 12000")
+	}
+	h.mergeMu.Lock()
+	h.mergeSettings = settings
+	h.mergeMu.Unlock()
+	return nil
+}
+
+// MergeSettings returns a snapshot safe for queue workers.
+func (h *Handler) MergeSettings() MergeSettings {
+	h.mergeMu.RLock()
+	defer h.mergeMu.RUnlock()
+	return h.mergeSettings
 }
 
 // SetSaveDir sets the directory for saving images and files.
@@ -328,10 +381,21 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		// Clean up old entries periodically (fire-and-forget)
 		go h.cleanSeenMsgs()
 	}
+	botID := client.BotID()
+	logMessageMeta(botID, msg)
+	text := extractText(msg)
+	directText := text != ""
+	if text == "" {
+		if voiceText := extractVoiceText(msg); voiceText != "" {
+			text = voiceText
+			log.Printf("[handler] bot=%s voice transcription from %s: %q", botID, msg.FromUserID, truncate(text, 80))
+		}
+	}
+	if text != "" {
+		log.Printf("[handler] bot=%s received from %s: %q", botID, msg.FromUserID, truncate(text, 80))
+	}
 	key := chatKey(client, msg.FromUserID)
-	queued, notifyOverload := h.enqueueChat(key, func() {
-		h.handleMessage(ctx, client, msg)
-	})
+	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text)})
 	if !queued && notifyOverload {
 		reply := "消息较多，我会按顺序处理；请稍后再发新的需求。"
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, NewClientID()); err != nil {
@@ -340,8 +404,8 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	}
 }
 
-func (h *Handler) enqueueChat(key string, job func()) (queued, notifyOverload bool) {
-	value, _ := h.chatQueues.LoadOrStore(key, &chatQueue{})
+func (h *Handler) enqueueChat(key string, job chatJob) (queued, notifyOverload bool) {
+	value, _ := h.chatQueues.LoadOrStore(key, &chatQueue{wake: make(chan struct{}, 1)})
 	queue := value.(*chatQueue)
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
@@ -351,6 +415,10 @@ func (h *Handler) enqueueChat(key string, job func()) (queued, notifyOverload bo
 		return false, notifyOverload
 	}
 	queue.jobs = append(queue.jobs, job)
+	select {
+	case queue.wake <- struct{}{}:
+	default:
+	}
 	if queue.running {
 		return true, false
 	}
@@ -373,8 +441,81 @@ func (h *Handler) runChatQueue(queue *chatQueue) {
 			queue.overloadNotified = false
 		}
 		queue.mu.Unlock()
-		job()
+		if job.run != nil {
+			job.run()
+			continue
+		}
+		if job.mergeable {
+			job = h.mergeQueuedText(queue, job)
+		}
+		h.handleMessage(job.ctx, job.client, job.msg)
 	}
+}
+
+func (h *Handler) isMergeableText(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || strings.HasPrefix(trimmed, "/") || strings.HasPrefix(trimmed, "@") {
+		return false
+	}
+	return h.saveDir == "" || !IsURL(trimmed)
+}
+
+func (h *Handler) mergeQueuedText(queue *chatQueue, first chatJob) chatJob {
+	settings := h.MergeSettings()
+	texts := []string{first.text}
+	chars := len(first.text)
+	latest := first
+	idle := time.NewTimer(settings.IdleDelay)
+	deadline := time.NewTimer(settings.MaxWait)
+	defer idle.Stop()
+	defer deadline.Stop()
+	for {
+		select {
+		case <-queue.wake:
+			queue.mu.Lock()
+			merged := false
+			for len(queue.jobs) > 0 && len(texts) < settings.MaxMessages {
+				next := queue.jobs[0]
+				if !next.mergeable || chars+1+len(next.text) > settings.MaxChars {
+					break
+				}
+				queue.jobs = queue.jobs[1:]
+				texts = append(texts, next.text)
+				chars += 1 + len(next.text)
+				latest = next
+				merged = true
+			}
+			queue.mu.Unlock()
+			if len(texts) >= settings.MaxMessages || chars >= settings.MaxChars {
+				return mergedJob(first, latest, texts)
+			}
+			if merged {
+				if !idle.Stop() {
+					select {
+					case <-idle.C:
+					default:
+					}
+				}
+				idle.Reset(settings.IdleDelay)
+			}
+		case <-idle.C:
+			return mergedJob(first, latest, texts)
+		case <-deadline.C:
+			return mergedJob(first, latest, texts)
+		}
+	}
+}
+
+func mergedJob(first, latest chatJob, texts []string) chatJob {
+	if len(texts) == 1 {
+		return first
+	}
+	merged := first
+	merged.msg.ContextToken = latest.msg.ContextToken
+	merged.msg.ItemList = []ilink.MessageItem{{Type: ilink.ItemTypeText, TextItem: &ilink.TextItem{Text: strings.Join(texts, "\n")}}}
+	merged.text = strings.Join(texts, "\n")
+	log.Printf("[handler] merged %d consecutive messages from %s", len(texts), first.msg.FromUserID)
+	return merged
 }
 
 func chatKey(client *ilink.Client, userID string) string {
@@ -383,15 +524,11 @@ func chatKey(client *ilink.Client, userID string) string {
 
 // handleMessage processes one already queued incoming message.
 func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage) {
-	botID := client.BotID()
-	logMessageMeta(botID, msg)
-
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
 	if text == "" {
 		if voiceText := extractVoiceText(msg); voiceText != "" {
 			text = voiceText
-			log.Printf("[handler] bot=%s voice transcription from %s: %q", botID, msg.FromUserID, truncate(text, 80))
 		}
 	}
 	if text == "" {
@@ -408,11 +545,9 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 			h.handleStoredMediaMessage(ctx, client, msg, "file", file.FileName, file.Media)
 			return
 		}
-		log.Printf("[handler] bot=%s received non-text message from %s, skipping", botID, msg.FromUserID)
+		log.Printf("[handler] bot=%s received non-text message from %s, skipping", client.BotID(), msg.FromUserID)
 		return
 	}
-
-	log.Printf("[handler] bot=%s received from %s: %q", botID, msg.FromUserID, truncate(text, 80))
 
 	// Store context token for this user
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)

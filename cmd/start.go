@@ -123,6 +123,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return config.Save(cfg)
 		},
 	)
+	if err := handler.SetMergeSettings(messageMergeSettings(cfg.MessageMerge.WithDefaults())); err != nil {
+		return fmt.Errorf("invalid message merge settings: %w", err)
+	}
 	handler.SetUserAgents(cfg.UserAgents)
 
 	// Populate agent metas for /status
@@ -194,6 +197,30 @@ func runStart(cmd *cobra.Command, args []string) error {
 		apiAddr = apiAddrFlag
 	}
 	apiServer := api.NewServer(initialAccounts.Clients, apiAddr)
+	apiServer.SetMessageMergeProvider(func() api.MessageMergeSettings {
+		return apiMessageMergeSettings(handler.MergeSettings())
+	})
+	apiServer.SetMessageMergeController(func(_ context.Context, settings api.MessageMergeSettings) (api.MessageMergeSettings, error) {
+		merge := messaging.MergeSettings{
+			IdleDelay:   time.Duration(settings.IdleSeconds) * time.Second,
+			MaxWait:     time.Duration(settings.MaxWaitSeconds) * time.Second,
+			MaxMessages: settings.MaxMessages,
+			MaxChars:    settings.MaxChars,
+		}
+		if err := handler.SetMergeSettings(merge); err != nil {
+			return api.MessageMergeSettings{}, err
+		}
+		configMu.Lock()
+		defer configMu.Unlock()
+		cfg.MessageMerge = config.MessageMergeConfig{
+			IdleSeconds: settings.IdleSeconds, MaxWaitSeconds: settings.MaxWaitSeconds,
+			MaxMessages: settings.MaxMessages, MaxChars: settings.MaxChars,
+		}
+		if err := config.Save(cfg); err != nil {
+			return api.MessageMergeSettings{}, err
+		}
+		return apiMessageMergeSettings(handler.MergeSettings()), nil
+	})
 	apiServer.SetAccountStatusProvider(func() []api.AccountStatus {
 		saved, err := ilink.LoadAccounts()
 		if err != nil {
@@ -308,6 +335,22 @@ func runMonitorWithRestart(ctx context.Context, creds *ilink.Credentials, handle
 		if restartDelay > maxRestartDelay {
 			restartDelay = maxRestartDelay
 		}
+	}
+}
+
+func messageMergeSettings(cfg config.MessageMergeConfig) messaging.MergeSettings {
+	return messaging.MergeSettings{
+		IdleDelay:   time.Duration(cfg.IdleSeconds) * time.Second,
+		MaxWait:     time.Duration(cfg.MaxWaitSeconds) * time.Second,
+		MaxMessages: cfg.MaxMessages,
+		MaxChars:    cfg.MaxChars,
+	}
+}
+
+func apiMessageMergeSettings(settings messaging.MergeSettings) api.MessageMergeSettings {
+	return api.MessageMergeSettings{
+		IdleSeconds: int(settings.IdleDelay / time.Second), MaxWaitSeconds: int(settings.MaxWait / time.Second),
+		MaxMessages: settings.MaxMessages, MaxChars: settings.MaxChars,
 	}
 }
 

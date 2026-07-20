@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
@@ -123,5 +124,31 @@ func TestHandleAccountStateDelegatesToController(t *testing.T) {
 	}
 	if got := len(server.clientsSnapshot()); got != 1 {
 		t.Fatalf("client count = %d, want 1", got)
+	}
+}
+
+func TestHandleMessageMergeReadsAndUpdatesSettings(t *testing.T) {
+	current := MessageMergeSettings{IdleSeconds: 3, MaxWaitSeconds: 10, MaxMessages: 10, MaxChars: 4000}
+	server := NewServer(nil, "")
+	server.SetMessageMergeProvider(func() MessageMergeSettings { return current })
+	server.SetMessageMergeController(func(_ context.Context, settings MessageMergeSettings) (MessageMergeSettings, error) {
+		current = settings
+		return current, nil
+	})
+
+	get := httptest.NewRequest(http.MethodGet, MessageMergePath, nil)
+	get.RemoteAddr = "127.0.0.1:12345"
+	getResp := httptest.NewRecorder()
+	server.handleMessageMerge(getResp, get)
+	if getResp.Code != http.StatusOK || !strings.Contains(getResp.Body.String(), `"idle_seconds":3`) {
+		t.Fatalf("GET = %d %s", getResp.Code, getResp.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, MessageMergePath, bytes.NewBufferString(`{"idle_seconds":4,"max_wait_seconds":12,"max_messages":8,"max_chars":3000}`))
+	post.RemoteAddr = "127.0.0.1:12345"
+	postResp := httptest.NewRecorder()
+	server.handleMessageMerge(postResp, post)
+	if postResp.Code != http.StatusOK || current.IdleSeconds != 4 || current.MaxChars != 3000 {
+		t.Fatalf("POST = %d settings=%+v", postResp.Code, current)
 	}
 }

@@ -14,7 +14,39 @@ type Config struct {
 	UserAgents   map[string]string      `json:"user_agents,omitempty"`
 	APIAddr      string                 `json:"api_addr,omitempty"`
 	SaveDir      string                 `json:"save_dir,omitempty"`
+	MessageMerge MessageMergeConfig     `json:"message_merge,omitempty"`
 	Agents       map[string]AgentConfig `json:"agents"`
+}
+
+// MessageMergeConfig controls how consecutive ordinary text messages are combined.
+type MessageMergeConfig struct {
+	IdleSeconds    int `json:"idle_seconds,omitempty"`
+	MaxWaitSeconds int `json:"max_wait_seconds,omitempty"`
+	MaxMessages    int `json:"max_messages,omitempty"`
+	MaxChars       int `json:"max_chars,omitempty"`
+}
+
+// DefaultMessageMergeConfig is intentionally conservative for normal mobile typing.
+func DefaultMessageMergeConfig() MessageMergeConfig {
+	return MessageMergeConfig{IdleSeconds: 3, MaxWaitSeconds: 10, MaxMessages: 10, MaxChars: 4000}
+}
+
+// WithDefaults makes legacy config files (without message_merge) use current defaults.
+func (c MessageMergeConfig) WithDefaults() MessageMergeConfig {
+	d := DefaultMessageMergeConfig()
+	if c.IdleSeconds > 0 {
+		d.IdleSeconds = c.IdleSeconds
+	}
+	if c.MaxWaitSeconds > 0 {
+		d.MaxWaitSeconds = c.MaxWaitSeconds
+	}
+	if c.MaxMessages > 0 {
+		d.MaxMessages = c.MaxMessages
+	}
+	if c.MaxChars > 0 {
+		d.MaxChars = c.MaxChars
+	}
+	return d
 }
 
 // AgentConfig holds configuration for a single agent.

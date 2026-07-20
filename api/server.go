@@ -18,6 +18,7 @@ const (
 	AccountReloadPath = "/api/internal/accounts/reload"
 	AccountsPath      = "/api/internal/accounts"
 	AccountStatePath  = "/api/internal/accounts/state"
+	MessageMergePath  = "/api/internal/settings/message-merge"
 )
 
 // AccountReloadResult describes the accounts active after a reload.
@@ -43,6 +44,17 @@ type AccountStatusProvider func() []AccountStatus
 // AccountStateController changes one Bot's enabled state and reloads accounts.
 type AccountStateController func(context.Context, string, bool) (AccountReloadResult, error)
 
+// MessageMergeSettings is the JSON-safe representation of message coalescing settings.
+type MessageMergeSettings struct {
+	IdleSeconds    int `json:"idle_seconds"`
+	MaxWaitSeconds int `json:"max_wait_seconds"`
+	MaxMessages    int `json:"max_messages"`
+	MaxChars       int `json:"max_chars"`
+}
+
+type MessageMergeProvider func() MessageMergeSettings
+type MessageMergeController func(context.Context, MessageMergeSettings) (MessageMergeSettings, error)
+
 // Server provides an HTTP API for sending messages.
 type Server struct {
 	mu       sync.RWMutex
@@ -50,6 +62,8 @@ type Server struct {
 	reloader AccountReloader
 	status   AccountStatusProvider
 	state    AccountStateController
+	merge    MessageMergeProvider
+	setMerge MessageMergeController
 	addr     string
 }
 
@@ -82,6 +96,18 @@ func (s *Server) SetAccountStateController(controller AccountStateController) {
 	s.state = controller
 }
 
+func (s *Server) SetMessageMergeProvider(provider MessageMergeProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.merge = provider
+}
+
+func (s *Server) SetMessageMergeController(controller MessageMergeController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setMerge = controller
+}
+
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
 	BotID    string `json:"bot_id,omitempty"`
@@ -98,6 +124,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(AccountReloadPath, s.handleAccountReload)
 	mux.HandleFunc(AccountsPath, s.handleAccounts)
 	mux.HandleFunc(AccountStatePath, s.handleAccountState)
+	mux.HandleFunc(MessageMergePath, s.handleMessageMerge)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -287,6 +314,45 @@ func (s *Server) handleAccountState(w http.ResponseWriter, r *http.Request) {
 		"disabled": req.Disabled,
 		"accounts": len(result.Clients),
 	})
+}
+
+func (s *Server) handleMessageMerge(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider, controller := s.merge, s.setMerge
+	s.mu.RUnlock()
+	if r.Method == http.MethodGet {
+		if provider == nil {
+			http.Error(w, "message merge settings are unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(provider())
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if controller == nil {
+		http.Error(w, "message merge settings are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var settings MessageMergeSettings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	updated, err := controller(r.Context(), settings)
+	if err != nil {
+		http.Error(w, "invalid message merge settings: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
 }
 
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
