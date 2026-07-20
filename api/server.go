@@ -17,6 +17,7 @@ import (
 const (
 	AccountReloadPath = "/api/internal/accounts/reload"
 	AccountsPath      = "/api/internal/accounts"
+	AccountStatePath  = "/api/internal/accounts/state"
 )
 
 // AccountReloadResult describes the accounts active after a reload.
@@ -39,12 +40,16 @@ type AccountStatus struct {
 // AccountStatusProvider returns the current monitor state for every loaded Bot.
 type AccountStatusProvider func() []AccountStatus
 
+// AccountStateController changes one Bot's enabled state and reloads accounts.
+type AccountStateController func(context.Context, string, bool) (AccountReloadResult, error)
+
 // Server provides an HTTP API for sending messages.
 type Server struct {
 	mu       sync.RWMutex
 	clients  []*ilink.Client
 	reloader AccountReloader
 	status   AccountStatusProvider
+	state    AccountStateController
 	addr     string
 }
 
@@ -70,6 +75,13 @@ func (s *Server) SetAccountStatusProvider(provider AccountStatusProvider) {
 	s.status = provider
 }
 
+// SetAccountStateController enables local account state changes through the loopback API.
+func (s *Server) SetAccountStateController(controller AccountStateController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.state = controller
+}
+
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
 	BotID    string `json:"bot_id,omitempty"`
@@ -85,6 +97,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc(AccountReloadPath, s.handleAccountReload)
 	mux.HandleFunc(AccountsPath, s.handleAccounts)
+	mux.HandleFunc(AccountStatePath, s.handleAccountState)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -232,6 +245,50 @@ func (s *Server) handleAccountReload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// AccountStateRequest is the JSON body for POST /api/internal/accounts/state.
+type AccountStateRequest struct {
+	BotID    string `json:"bot_id"`
+	Disabled bool   `json:"disabled"`
+}
+
+func (s *Server) handleAccountState(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	var req AccountStateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BotID == "" {
+		http.Error(w, "bot_id is required", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	controller := s.state
+	s.mu.RUnlock()
+	if controller == nil {
+		http.Error(w, "account state changes are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	result, err := controller(r.Context(), req.BotID, req.Disabled)
+	if err != nil {
+		log.Printf("[api] account state change failed: %v", err)
+		http.Error(w, "account state change failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	s.clients = append([]*ilink.Client(nil), result.Clients...)
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"bot_id":   req.BotID,
+		"disabled": req.Disabled,
+		"accounts": len(result.Clients),
+	})
+}
+
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -283,6 +340,8 @@ func accountStatusLabel(status string) string {
 		return "在线"
 	case "expired":
 		return "会话已失效"
+	case "disabled":
+		return "已停用"
 	default:
 		return "启动中"
 	}

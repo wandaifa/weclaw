@@ -194,7 +194,55 @@ func runStart(cmd *cobra.Command, args []string) error {
 		apiAddr = apiAddrFlag
 	}
 	apiServer := api.NewServer(initialAccounts.Clients, apiAddr)
-	apiServer.SetAccountStatusProvider(accountManager.Statuses)
+	apiServer.SetAccountStatusProvider(func() []api.AccountStatus {
+		saved, err := ilink.LoadAccounts()
+		if err != nil {
+			return accountManager.Statuses()
+		}
+		loaded := make(map[string]string)
+		for _, status := range accountManager.Statuses() {
+			loaded[status.BotID] = status.Status
+		}
+		statuses := make([]api.AccountStatus, 0, len(saved))
+		for _, account := range saved {
+			status := loaded[account.BotID]
+			if account.Disabled {
+				status = "disabled"
+			} else if status == "" {
+				status = "starting"
+			}
+			statuses = append(statuses, api.AccountStatus{BotID: account.BotID, ILinkUserID: account.ILinkUserID, Status: status})
+		}
+		return statuses
+	})
+	apiServer.SetAccountStateController(func(ctx context.Context, botID string, disabled bool) (api.AccountReloadResult, error) {
+		accounts, err := ilink.LoadAccounts()
+		if err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		found := false
+		for _, account := range accounts {
+			if account.BotID == botID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return api.AccountReloadResult{}, fmt.Errorf("bot_id %q is not saved locally", botID)
+		}
+		if err := ilink.SetAccountDisabled(botID, disabled); err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		credentials, err := ilink.LoadAllCredentials()
+		if err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		result, err := accountManager.Reload(credentials)
+		if err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		return api.AccountReloadResult{Clients: result.Clients, Added: result.Added, Replaced: result.Replaced}, nil
+	})
 	apiServer.SetAccountReloader(func(context.Context) (api.AccountReloadResult, error) {
 		credentials, err := ilink.LoadAllCredentials()
 		if err != nil {

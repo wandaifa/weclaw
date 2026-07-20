@@ -106,3 +106,22 @@ func TestHandleAccountsReturnsLoadedBotIDs(t *testing.T) {
 		t.Fatalf("accounts = %v", body.Accounts)
 	}
 }
+
+func TestHandleAccountStateDelegatesToController(t *testing.T) {
+	called := false
+	server := NewServer(nil, "")
+	server.SetAccountStateController(func(_ context.Context, botID string, disabled bool) (AccountReloadResult, error) {
+		called = botID == "bot@im.bot" && disabled
+		return AccountReloadResult{Clients: []*ilink.Client{ilink.NewClient(&ilink.Credentials{ILinkBotID: "other@im.bot"})}}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, AccountStatePath, bytes.NewBufferString(`{"bot_id":"bot@im.bot","disabled":true}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleAccountState(resp, req)
+	if resp.Code != http.StatusOK || !called {
+		t.Fatalf("status = %d, called = %v: %s", resp.Code, called, resp.Body.String())
+	}
+	if got := len(server.clientsSnapshot()); got != 1 {
+		t.Fatalf("client count = %d, want 1", got)
+	}
+}
