@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -80,5 +81,28 @@ func TestHandleAccountReloadRejectsNonLoopback(t *testing.T) {
 	}
 	if called {
 		t.Fatal("reloader should not be called for a non-loopback request")
+	}
+}
+
+func TestHandleAccountsReturnsLoadedBotIDs(t *testing.T) {
+	server := NewServer([]*ilink.Client{
+		ilink.NewClient(&ilink.Credentials{ILinkBotID: "first@im.bot"}),
+		ilink.NewClient(&ilink.Credentials{ILinkBotID: "second@im.bot"}),
+	}, "")
+	req := httptest.NewRequest(http.MethodGet, AccountsPath, nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleAccounts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Code)
+	}
+	var body struct {
+		Accounts []AccountStatus `json:"accounts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Accounts) != 2 || body.Accounts[0].BotID != "first@im.bot" || body.Accounts[1].BotID != "second@im.bot" {
+		t.Fatalf("accounts = %v", body.Accounts)
 	}
 }

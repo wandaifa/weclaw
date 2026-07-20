@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	qrCodeURL     = "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3"
-	qrStatusURL   = "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode="
-	statusWait     = "wait"
-	statusScanned  = "scaned"
+	qrCodeURL       = "https://ilinkai.weixin.qq.com/ilink/bot/get_bot_qrcode?bot_type=3"
+	qrStatusURL     = "https://ilinkai.weixin.qq.com/ilink/bot/get_qrcode_status?qrcode="
+	statusWait      = "wait"
+	statusScanned   = "scaned"
 	statusConfirmed = "confirmed"
-	statusExpired  = "expired"
+	statusExpired   = "expired"
 )
 
 // FetchQRCode retrieves a new QR code for login.
@@ -139,12 +139,95 @@ func SaveCredentials(creds *Credentials) error {
 	return nil
 }
 
+// Account describes a saved Bot credential and its local loading state.
+// Tokens are intentionally not exposed by this type.
+type Account struct {
+	BotID       string
+	ILinkUserID string
+	Disabled    bool
+}
+
+// DisabledAccountPath returns the local marker path used to keep a Bot from
+// being loaded. The credential itself is never removed by disabling an account.
+func DisabledAccountPath(botID string) (string, error) {
+	dir, err := AccountsDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, NormalizeAccountID(botID)+".disabled"), nil
+}
+
+// SetAccountDisabled changes only the local loading marker for a saved Bot.
+func SetAccountDisabled(botID string, disabled bool) error {
+	if botID == "" {
+		return fmt.Errorf("bot ID is required")
+	}
+	path, err := DisabledAccountPath(botID)
+	if err != nil {
+		return err
+	}
+	if disabled {
+		if err := os.WriteFile(path, []byte("disabled\n"), 0o600); err != nil {
+			return fmt.Errorf("disable account: %w", err)
+		}
+		return nil
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("enable account: %w", err)
+	}
+	return nil
+}
+
+// LoadAccounts returns every saved account, including locally disabled ones.
+func LoadAccounts() ([]Account, error) {
+	dir, err := AccountsDir()
+	if err != nil {
+		return nil, err
+	}
+	return loadAccountsAt(dir)
+}
+
 // LoadAllCredentials loads all saved account credentials.
 func LoadAllCredentials() ([]*Credentials, error) {
 	dir, err := AccountsDir()
 	if err != nil {
 		return nil, err
 	}
+	return loadCredentialsAt(dir)
+}
+
+func loadCredentialsAt(dir string) ([]*Credentials, error) {
+	accounts, err := loadAccountsWithCredentialsAt(dir)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*Credentials, 0, len(accounts))
+	for _, account := range accounts {
+		if !account.Disabled {
+			result = append(result, account.credentials)
+		}
+	}
+	return result, nil
+}
+
+type accountWithCredentials struct {
+	Account
+	credentials *Credentials
+}
+
+func loadAccountsAt(dir string) ([]Account, error) {
+	accounts, err := loadAccountsWithCredentialsAt(dir)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Account, 0, len(accounts))
+	for _, account := range accounts {
+		result = append(result, account.Account)
+	}
+	return result, nil
+}
+
+func loadAccountsWithCredentialsAt(dir string) ([]accountWithCredentials, error) {
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -154,7 +237,7 @@ func LoadAllCredentials() ([]*Credentials, error) {
 		return nil, fmt.Errorf("read accounts dir: %w", err)
 	}
 
-	var result []*Credentials
+	var result []accountWithCredentials
 	for _, e := range entries {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
@@ -164,8 +247,13 @@ func LoadAllCredentials() ([]*Credentials, error) {
 			continue
 		}
 		var creds Credentials
-		if json.Unmarshal(data, &creds) == nil && creds.BotToken != "" {
-			result = append(result, &creds)
+		if json.Unmarshal(data, &creds) == nil && creds.BotToken != "" && creds.ILinkBotID != "" {
+			disabledPath := filepath.Join(dir, NormalizeAccountID(creds.ILinkBotID)+".disabled")
+			_, disabledErr := os.Stat(disabledPath)
+			result = append(result, accountWithCredentials{
+				Account:     Account{BotID: creds.ILinkBotID, ILinkUserID: creds.ILinkUserID, Disabled: disabledErr == nil},
+				credentials: &creds,
+			})
 		}
 	}
 	return result, nil

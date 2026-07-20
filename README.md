@@ -28,6 +28,21 @@ That's it. On first start, WeClaw will:
 
 Use `weclaw login` to add additional WeChat accounts.
 
+### Multi-Bot account management
+
+```bash
+# List saved Bots and their local/runtime loading state
+weclaw accounts
+
+# Disable one Bot without deleting its credentials
+weclaw accounts disable --bot "bot_id@im.bot"
+
+# Enable it again
+weclaw accounts enable --bot "bot_id@im.bot"
+```
+
+Enable and disable try to hot-reload the running service; use `weclaw restart` if that reload is unavailable. A new WeChat QR login creates a **new** Bot ID rather than renewing an old one. Run `weclaw login`, verify the new Bot, then disable the expired Bot.
+
 ### macOS LaunchAgent
 
 When `~/Library/LaunchAgents/ai.weclaw.bridge.plist` is installed, `weclaw start`,

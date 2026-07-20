@@ -13,7 +13,7 @@ func TestAccountManagerReloadAddsDeduplicatesAndReplaces(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	started := make(chan string, 4)
 	stopped := make(chan string, 4)
-	runner := func(ctx context.Context, creds *ilink.Credentials, _ *messaging.Handler) {
+	runner := func(ctx context.Context, creds *ilink.Credentials, _ *messaging.Handler, _ func(string)) {
 		started <- creds.ILinkBotID + ":" + creds.BotToken
 		<-ctx.Done()
 		stopped <- creds.ILinkBotID + ":" + creds.BotToken
@@ -62,6 +62,32 @@ func TestAccountManagerReloadAddsDeduplicatesAndReplaces(t *testing.T) {
 		t.Fatalf("unexpected monitor starts: %v", gotStarts)
 	}
 
+	cancel()
+	manager.Wait()
+}
+
+func TestAccountManagerReloadRemovesDisabledAccount(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stopped := make(chan string, 1)
+	runner := func(ctx context.Context, creds *ilink.Credentials, _ *messaging.Handler, _ func(string)) {
+		<-ctx.Done()
+		stopped <- creds.ILinkBotID
+	}
+	manager := newAccountManagerWithRunner(ctx, nil, runner)
+	first := &ilink.Credentials{ILinkBotID: "bot-1", BotToken: "token-1"}
+	second := &ilink.Credentials{ILinkBotID: "bot-2", BotToken: "token-2"}
+	if _, err := manager.Reload([]*ilink.Credentials{first, second}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := manager.Reload([]*ilink.Credentials{second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Clients) != 1 || result.Clients[0].BotID() != "bot-2" {
+		t.Fatalf("clients = %+v, want only bot-2", result.Clients)
+	}
+	expectChannelValue(t, stopped, "bot-1")
 	cancel()
 	manager.Wait()
 }

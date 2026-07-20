@@ -194,6 +194,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		apiAddr = apiAddrFlag
 	}
 	apiServer := api.NewServer(initialAccounts.Clients, apiAddr)
+	apiServer.SetAccountStatusProvider(accountManager.Statuses)
 	apiServer.SetAccountReloader(func(context.Context) (api.AccountReloadResult, error) {
 		credentials, err := ilink.LoadAllCredentials()
 		if err != nil {
@@ -221,12 +222,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 }
 
 // runMonitorWithRestart runs a monitor with automatic restart on failure.
-func runMonitorWithRestart(ctx context.Context, creds *ilink.Credentials, handler *messaging.Handler) {
+func runMonitorWithRestart(ctx context.Context, creds *ilink.Credentials, handler *messaging.Handler, setStatus func(string)) {
 	const maxRestartDelay = 30 * time.Second
 	restartDelay := 3 * time.Second
 
 	for {
 		log.Printf("[%s] Starting monitor...", creds.ILinkBotID)
+		setStatus("active")
 
 		client := ilink.NewClient(creds)
 		monitor, err := ilink.NewMonitor(client, handler.HandleMessage)
@@ -241,6 +243,7 @@ func runMonitorWithRestart(ctx context.Context, creds *ilink.Credentials, handle
 			return
 		}
 		if errors.Is(err, ilink.ErrSessionExpired) {
+			setStatus("expired")
 			log.Printf("[%s] Monitor stopped because its WeChat session expired; other accounts remain online.", creds.ILinkBotID)
 			return
 		}

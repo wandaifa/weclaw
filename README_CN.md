@@ -29,6 +29,21 @@ weclaw start
 
 使用 `weclaw login` 可以添加更多微信账号。
 
+### 多 Bot 账号管理
+
+```bash
+# 查看已保存的 Bot，以及本地启用/停用和服务加载状态
+weclaw accounts
+
+# 停用一个 Bot：保留凭据，不再接收或发送消息
+weclaw accounts disable --bot "bot_id@im.bot"
+
+# 重新启用
+weclaw accounts enable --bot "bot_id@im.bot"
+```
+
+停用/启用会立即尝试热重载运行中的服务；失败时执行 `weclaw restart` 即可。微信重新扫码会创建**新的** Bot ID，不能给原 Bot ID 续期；旧 Bot 会话过期后，执行 `weclaw login` 新增账号，确认新 Bot 可用后再停用旧 Bot。
+
 ### 其他安装方式
 
 ```bash

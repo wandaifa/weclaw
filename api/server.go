@@ -14,7 +14,10 @@ import (
 	"github.com/fastclaw-ai/weclaw/messaging"
 )
 
-const AccountReloadPath = "/api/internal/accounts/reload"
+const (
+	AccountReloadPath = "/api/internal/accounts/reload"
+	AccountsPath      = "/api/internal/accounts"
+)
 
 // AccountReloadResult describes the accounts active after a reload.
 type AccountReloadResult struct {
@@ -26,11 +29,22 @@ type AccountReloadResult struct {
 // AccountReloader refreshes credentials and starts monitors for changed accounts.
 type AccountReloader func(context.Context) (AccountReloadResult, error)
 
+// AccountStatus describes one loaded Bot without exposing its credential.
+type AccountStatus struct {
+	BotID       string `json:"bot_id"`
+	ILinkUserID string `json:"ilink_user_id"`
+	Status      string `json:"status"`
+}
+
+// AccountStatusProvider returns the current monitor state for every loaded Bot.
+type AccountStatusProvider func() []AccountStatus
+
 // Server provides an HTTP API for sending messages.
 type Server struct {
 	mu       sync.RWMutex
 	clients  []*ilink.Client
 	reloader AccountReloader
+	status   AccountStatusProvider
 	addr     string
 }
 
@@ -49,6 +63,13 @@ func (s *Server) SetAccountReloader(reloader AccountReloader) {
 	s.reloader = reloader
 }
 
+// SetAccountStatusProvider exposes monitor state through the loopback-only account endpoint.
+func (s *Server) SetAccountStatusProvider(provider AccountStatusProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.status = provider
+}
+
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
 	BotID    string `json:"bot_id,omitempty"`
@@ -63,6 +84,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/api/send", s.handleSend)
 	mux.HandleFunc(AccountReloadPath, s.handleAccountReload)
+	mux.HandleFunc(AccountsPath, s.handleAccounts)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -92,10 +114,12 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		Addr         string
 		AccountCount int
 		HasAccounts  bool
+		Accounts     []AccountStatus
 	}{
 		Addr:         s.addr,
 		AccountCount: len(clients),
 		HasAccounts:  len(clients) > 0,
+		Accounts:     s.accountStatuses(),
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if err := indexTemplate.Execute(w, data); err != nil {
@@ -208,6 +232,36 @@ func (s *Server) handleAccountReload(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string][]AccountStatus{"accounts": s.accountStatuses()})
+}
+
+func (s *Server) accountStatuses() []AccountStatus {
+	s.mu.RLock()
+	provider := s.status
+	s.mu.RUnlock()
+	if provider != nil {
+		return provider()
+	}
+	clients := s.clientsSnapshot()
+	accounts := make([]AccountStatus, 0, len(clients))
+	for _, client := range clients {
+		if client != nil {
+			accounts = append(accounts, AccountStatus{BotID: client.BotID(), Status: "active"})
+		}
+	}
+	return accounts
+}
+
 func (s *Server) clientsSnapshot() []*ilink.Client {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -223,14 +277,25 @@ func isLoopbackRequest(remoteAddr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
+func accountStatusLabel(status string) string {
+	switch status {
+	case "active":
+		return "在线"
+	case "expired":
+		return "会话已失效"
+	default:
+		return "启动中"
+	}
+}
+
+var indexTemplate = template.Must(template.New("index").Funcs(template.FuncMap{"statusLabel": accountStatusLabel}).Parse(`<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>WeClaw API</title>
 <style>
-*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111b21;color:#e9edef;font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.card{width:min(680px,calc(100vw - 32px));background:#202c33;border:1px solid #2a3942;border-radius:8px;padding:24px;box-shadow:0 18px 48px #0006}.top{display:flex;align-items:center;gap:10px;margin-bottom:18px}.dot{width:10px;height:10px;border-radius:50%;background:#00a884;box-shadow:0 0 0 4px #00a88422}h1{font-size:22px;line-height:1.2;margin:0}.muted{color:#8696a0}.status{display:inline-flex;align-items:center;gap:8px;margin:8px 0 20px;padding:7px 11px;border-radius:999px;background:#12372f;color:#8df4cf;font-weight:600}.warn{background:#3a2d16;color:#ffd98b}.grid{display:grid;grid-template-columns:130px 1fr;gap:8px 14px;margin:18px 0}.key{color:#8696a0}.value{word-break:break-all}code{font-family:"SFMono-Regular",Consolas,monospace;background:#111b21;border:1px solid #2a3942;border-radius:5px;padding:2px 6px}.endpoints{display:grid;gap:10px;margin-top:18px}.endpoint{padding:12px;border-radius:6px;background:#111b21;border:1px solid #2a3942}.method{display:inline-block;min-width:46px;margin-right:8px;color:#00a884;font-weight:700}.hint{margin-top:18px;color:#8696a0;font-size:13px}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#111b21;color:#e9edef;font:15px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.card{width:min(680px,calc(100vw - 32px));background:#202c33;border:1px solid #2a3942;border-radius:8px;padding:24px;box-shadow:0 18px 48px #0006}.top{display:flex;align-items:center;gap:10px;margin-bottom:18px}.dot{width:10px;height:10px;border-radius:50%;background:#00a884;box-shadow:0 0 0 4px #00a88422}h1{font-size:22px;line-height:1.2;margin:0}.muted{color:#8696a0}.status{display:inline-flex;align-items:center;gap:8px;margin:8px 0 20px;padding:7px 11px;border-radius:999px;background:#12372f;color:#8df4cf;font-weight:600}.warn{background:#3a2d16;color:#ffd98b}.grid{display:grid;grid-template-columns:130px 1fr;gap:8px 14px;margin:18px 0}.key{color:#8696a0}.value{word-break:break-all}code{font-family:"SFMono-Regular",Consolas,monospace;background:#111b21;border:1px solid #2a3942;border-radius:5px;padding:2px 6px}.endpoints{display:grid;gap:10px;margin-top:18px}.endpoint,.account{padding:12px;border-radius:6px;background:#111b21;border:1px solid #2a3942}.method{display:inline-block;min-width:46px;margin-right:8px;color:#00a884;font-weight:700}.accounts{display:grid;gap:8px;margin-top:18px}.account{display:grid;gap:3px}.account b{word-break:break-all}.account span{color:#8696a0;font-size:13px;word-break:break-all}.account em{font-style:normal;color:#8df4cf}.account em.expired{color:#ffd98b}.hint{margin-top:18px;color:#8696a0;font-size:13px}
 </style>
 </head>
 <body>
@@ -250,6 +315,10 @@ var indexTemplate = template.Must(template.New("index").Parse(`<!doctype html>
     <div class="endpoint"><span class="method">GET</span><code>/health</code><div class="muted">返回 ok，表示 API 服务在线。</div></div>
     <div class="endpoint"><span class="method">POST</span><code>/api/send</code><div class="muted">发送微信文字、图片、视频或文件消息；多账号时请求体必须提供 bot_id。</div></div>
   </div>
+  <section class="accounts">
+    <div class="muted">已加载微信账号</div>
+    {{range .Accounts}}<div class="account"><b>{{.BotID}}</b><span>扫码者：{{.ILinkUserID}}</span><em class="{{.Status}}">{{statusLabel .Status}}</em></div>{{end}}
+  </section>
   <div class="hint">聊天记录查看页在 <code>http://127.0.0.1:18022/</code>，这里是 WeClaw 主服务 API。</div>
 </main>
 </body>
