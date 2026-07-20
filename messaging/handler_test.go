@@ -179,6 +179,34 @@ func TestTryBeginChatBlocksSameUser(t *testing.T) {
 	}
 }
 
+func TestChatQueueProcessesOneConversationInOrder(t *testing.T) {
+	h := newTestHandler()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	var order []string
+
+	if queued, _ := h.enqueueChat("bot\x00user", func() {
+		order = append(order, "first")
+		close(started)
+		<-release
+	}); !queued {
+		t.Fatal("first message was not queued")
+	}
+	<-started
+	if queued, _ := h.enqueueChat("bot\x00user", func() {
+		order = append(order, "second")
+		close(done)
+	}); !queued {
+		t.Fatal("second message was not queued")
+	}
+	close(release)
+	<-done
+	if got := strings.Join(order, ","); got != "first,second" {
+		t.Fatalf("order = %q, want first,second", got)
+	}
+}
+
 func TestTryBeginChatAllowsDifferentUsers(t *testing.T) {
 	h := newTestHandler()
 	if _, ok := h.tryBeginChat("user-1"); !ok {

@@ -45,12 +45,22 @@ type Handler struct {
 	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
 	pendingMedia  sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
 	activeChats   sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
+	chatQueues    sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
 }
 
 type pendingMedia struct {
 	Kind string
 	Name string
 	Path string
+}
+
+const maxQueuedMessages = 20
+
+type chatQueue struct {
+	mu               sync.Mutex
+	jobs             []func()
+	running          bool
+	overloadNotified bool
 }
 
 // NewHandler creates a new message handler.
@@ -299,10 +309,8 @@ func (h *Handler) parseCommand(text string) ([]string, string) {
 	return unique, rest
 }
 
-// HandleMessage processes a single incoming message.
+// HandleMessage queues a message so one Bot/user conversation is processed in order.
 func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage) {
-	botID := client.BotID()
-
 	// Only process user messages that are finished
 	if msg.MessageType != ilink.MessageTypeUser {
 		return
@@ -320,6 +328,62 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		// Clean up old entries periodically (fire-and-forget)
 		go h.cleanSeenMsgs()
 	}
+	key := chatKey(client, msg.FromUserID)
+	queued, notifyOverload := h.enqueueChat(key, func() {
+		h.handleMessage(ctx, client, msg)
+	})
+	if !queued && notifyOverload {
+		reply := "消息较多，我会按顺序处理；请稍后再发新的需求。"
+		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, NewClientID()); err != nil {
+			log.Printf("[handler] failed to send queue notice to %s: %v", msg.FromUserID, err)
+		}
+	}
+}
+
+func (h *Handler) enqueueChat(key string, job func()) (queued, notifyOverload bool) {
+	value, _ := h.chatQueues.LoadOrStore(key, &chatQueue{})
+	queue := value.(*chatQueue)
+	queue.mu.Lock()
+	defer queue.mu.Unlock()
+	if len(queue.jobs) >= maxQueuedMessages {
+		notifyOverload = !queue.overloadNotified
+		queue.overloadNotified = true
+		return false, notifyOverload
+	}
+	queue.jobs = append(queue.jobs, job)
+	if queue.running {
+		return true, false
+	}
+	queue.running = true
+	go h.runChatQueue(queue)
+	return true, false
+}
+
+func (h *Handler) runChatQueue(queue *chatQueue) {
+	for {
+		queue.mu.Lock()
+		if len(queue.jobs) == 0 {
+			queue.running = false
+			queue.mu.Unlock()
+			return
+		}
+		job := queue.jobs[0]
+		queue.jobs = queue.jobs[1:]
+		if len(queue.jobs) < maxQueuedMessages {
+			queue.overloadNotified = false
+		}
+		queue.mu.Unlock()
+		job()
+	}
+}
+
+func chatKey(client *ilink.Client, userID string) string {
+	return client.BotID() + "\x00" + userID
+}
+
+// handleMessage processes one already queued incoming message.
+func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage) {
+	botID := client.BotID()
 	logMessageMeta(botID, msg)
 
 	// Extract text from item list (text message or voice transcription)
@@ -416,7 +480,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	// No message -> switch default agent (only first name)
 	if message == "" {
 		if len(agentNames) == 1 && h.isKnownAgent(agentNames[0]) {
-			wait, ok := h.tryBeginChat(msg.FromUserID)
+			wait, ok := h.tryBeginChat(chatKey(client, msg.FromUserID))
 			if !ok {
 				reply := agentBusyReply(wait)
 				if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
@@ -425,7 +489,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 				return
 			}
 			reply := h.switchUserAgent(ctx, msg.FromUserID, agentNames[0])
-			h.endChat(msg.FromUserID)
+			h.endChat(chatKey(client, msg.FromUserID))
 			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 			}
@@ -480,13 +544,13 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 
 	agentName, ag, selected := h.selectedAgent(msg.FromUserID)
 
-	wait, ok := h.tryBeginChat(msg.FromUserID)
+	wait, ok := h.tryBeginChat(chatKey(client, msg.FromUserID))
 	if !ok {
 		log.Printf("[handler] selected agent %q is busy for %s, sending busy notice", agentName, msg.FromUserID)
 		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
 		return
 	}
-	defer h.endChat(msg.FromUserID)
+	defer h.endChat(chatKey(client, msg.FromUserID))
 
 	if shouldRedirectClaudeImageGeneration(agentName, text) {
 		SendTextReply(ctx, client, msg.FromUserID, claudeImageGenerationReply(), msg.ContextToken, clientID)
@@ -618,13 +682,13 @@ func (h *Handler) endChat(userID string) {
 
 // sendToNamedAgent sends the message to a specific agent and replies.
 func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, name, message, clientID string) {
-	wait, ok := h.tryBeginChat(msg.FromUserID)
+	wait, ok := h.tryBeginChat(chatKey(client, msg.FromUserID))
 	if !ok {
 		log.Printf("[handler] agent %q is busy for %s, sending busy notice", name, msg.FromUserID)
 		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
 		return
 	}
-	defer h.endChat(msg.FromUserID)
+	defer h.endChat(chatKey(client, msg.FromUserID))
 
 	if shouldRedirectClaudeImageGeneration(name, message) {
 		SendTextReply(ctx, client, msg.FromUserID, claudeImageGenerationReply(), msg.ContextToken, clientID)
@@ -650,13 +714,13 @@ func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, ms
 // broadcastToAgents sends the message to multiple agents in parallel.
 // Each reply is sent as a separate message with the agent name prefix.
 func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, names []string, message string) {
-	wait, ok := h.tryBeginChat(msg.FromUserID)
+	wait, ok := h.tryBeginChat(chatKey(client, msg.FromUserID))
 	if !ok {
 		log.Printf("[handler] broadcast is busy for %s, sending busy notice", msg.FromUserID)
 		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, NewClientID())
 		return
 	}
-	defer h.endChat(msg.FromUserID)
+	defer h.endChat(chatKey(client, msg.FromUserID))
 
 	message = h.withPendingMediaContext(msg.FromUserID, message)
 	type result struct {
@@ -1074,13 +1138,13 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
 
-	wait, ok := h.tryBeginChat(msg.FromUserID)
+	wait, ok := h.tryBeginChat(chatKey(client, msg.FromUserID))
 	if !ok {
 		log.Printf("[handler] image handling is busy for %s, sending busy notice", msg.FromUserID)
 		SendTextReply(ctx, client, msg.FromUserID, agentBusyReply(wait), msg.ContextToken, clientID)
 		return
 	}
-	defer h.endChat(msg.FromUserID)
+	defer h.endChat(chatKey(client, msg.FromUserID))
 
 	go func() {
 		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
