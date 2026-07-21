@@ -16,6 +16,7 @@ type Config struct {
 	APIAddr         string                    `json:"api_addr,omitempty"`
 	SaveDir         string                    `json:"save_dir,omitempty"`
 	MessageMerge    MessageMergeConfig        `json:"message_merge,omitempty"`
+	MediaRetention  MediaRetentionConfig      `json:"media_retention,omitempty"`
 	Agents          map[string]AgentConfig    `json:"agents"`
 }
 
@@ -75,6 +76,26 @@ func (c MessageMergeConfig) WithDefaults() MessageMergeConfig {
 		d.MaxChars = c.MaxChars
 	}
 	return d
+}
+
+// MediaRetentionConfig controls how long received media files are kept on
+// disk before the daily cleanup job deletes them.
+type MediaRetentionConfig struct {
+	Days int `json:"days,omitempty"`
+}
+
+// DefaultMediaRetentionConfig keeps media for 180 days, covering most
+// look-back scenarios while bounding unbounded disk growth.
+func DefaultMediaRetentionConfig() MediaRetentionConfig {
+	return MediaRetentionConfig{Days: 180}
+}
+
+// WithDefaults makes legacy config files (without media_retention) use the default.
+func (c MediaRetentionConfig) WithDefaults() MediaRetentionConfig {
+	if c.Days > 0 {
+		return c
+	}
+	return DefaultMediaRetentionConfig()
 }
 
 // AgentConfig holds configuration for a single agent.

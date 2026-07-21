@@ -19,6 +19,7 @@ const (
 	AccountsPath         = "/api/internal/accounts"
 	AccountStatePath     = "/api/internal/accounts/state"
 	MessageMergePath     = "/api/internal/settings/message-merge"
+	MediaRetentionPath   = "/api/internal/settings/media-retention"
 	PermissionsPath      = "/api/internal/permissions"
 	PermissionsUsagePath = "/api/internal/permissions/usage"
 )
@@ -57,6 +58,14 @@ type MessageMergeSettings struct {
 type MessageMergeProvider func() MessageMergeSettings
 type MessageMergeController func(context.Context, MessageMergeSettings) (MessageMergeSettings, error)
 
+// MediaRetentionSettings is the JSON-safe representation of the media cleanup retention window.
+type MediaRetentionSettings struct {
+	Days int `json:"days"`
+}
+
+type MediaRetentionProvider func() MediaRetentionSettings
+type MediaRetentionController func(context.Context, MediaRetentionSettings) (MediaRetentionSettings, error)
+
 // UserPermissionInfo describes one WeChat user's configured sandbox tier for
 // the internal permissions API. Owners are listed read-only (IsOwner=true)
 // and cannot be changed through this API.
@@ -94,17 +103,19 @@ type UsageProvider func() []UsageInfo
 
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	mu            sync.RWMutex
-	clients       []*ilink.Client
-	reloader      AccountReloader
-	status        AccountStatusProvider
-	state         AccountStateController
-	merge         MessageMergeProvider
-	setMerge      MessageMergeController
-	permissions   PermissionsProvider
-	setPermission PermissionController
-	usage         UsageProvider
-	addr          string
+	mu                sync.RWMutex
+	clients           []*ilink.Client
+	reloader          AccountReloader
+	status            AccountStatusProvider
+	state             AccountStateController
+	merge             MessageMergeProvider
+	setMerge          MessageMergeController
+	mediaRetention    MediaRetentionProvider
+	setMediaRetention MediaRetentionController
+	permissions       PermissionsProvider
+	setPermission     PermissionController
+	usage             UsageProvider
+	addr              string
 }
 
 // NewServer creates an API server.
@@ -148,6 +159,18 @@ func (s *Server) SetMessageMergeController(controller MessageMergeController) {
 	s.setMerge = controller
 }
 
+func (s *Server) SetMediaRetentionProvider(provider MediaRetentionProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.mediaRetention = provider
+}
+
+func (s *Server) SetMediaRetentionController(controller MediaRetentionController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setMediaRetention = controller
+}
+
 // SetPermissionsProvider exposes per-user sandbox tiers through the loopback-only permissions endpoint.
 func (s *Server) SetPermissionsProvider(provider PermissionsProvider) {
 	s.mu.Lock()
@@ -186,6 +209,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(AccountsPath, s.handleAccounts)
 	mux.HandleFunc(AccountStatePath, s.handleAccountState)
 	mux.HandleFunc(MessageMergePath, s.handleMessageMerge)
+	mux.HandleFunc(MediaRetentionPath, s.handleMediaRetention)
 	mux.HandleFunc(PermissionsPath, s.handlePermissions)
 	mux.HandleFunc(PermissionsUsagePath, s.handlePermissionsUsage)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -412,6 +436,49 @@ func (s *Server) handleMessageMerge(w http.ResponseWriter, r *http.Request) {
 	updated, err := controller(r.Context(), settings)
 	if err != nil {
 		http.Error(w, "invalid message merge settings: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handleMediaRetention(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider, controller := s.mediaRetention, s.setMediaRetention
+	s.mu.RUnlock()
+	if r.Method == http.MethodGet {
+		if provider == nil {
+			http.Error(w, "media retention settings are unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(provider())
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if controller == nil {
+		http.Error(w, "media retention settings are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var settings MediaRetentionSettings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if settings.Days < 1 || settings.Days > 3650 {
+		http.Error(w, "days must be between 1 and 3650", http.StatusBadRequest)
+		return
+	}
+	updated, err := controller(r.Context(), settings)
+	if err != nil {
+		http.Error(w, "invalid media retention settings: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

@@ -123,6 +123,33 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 	// Create handler with an agent factory for on-demand agent creation
 	var configMu sync.Mutex
+
+	// Daily media cleanup: runs once at startup, then every 24h. Best-effort
+	// and non-blocking — a failure here must never stop message handling.
+	go func() {
+		runCleanup := func() {
+			configMu.Lock()
+			days := cfg.MediaRetention.WithDefaults().Days
+			configMu.Unlock()
+			deleted, err := messaging.CleanupExpiredMedia(days)
+			if err != nil {
+				log.Printf("[media-cleanup] completed with errors, deleted %d file(s): %v", deleted, err)
+			} else if deleted > 0 {
+				log.Printf("[media-cleanup] deleted %d expired media file(s) (retention: %d days)", deleted, days)
+			}
+		}
+		runCleanup()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runCleanup()
+			}
+		}
+	}()
 	handler := messaging.NewHandler(
 		func(ctx context.Context, name string) agent.Agent {
 			return createAgentByName(ctx, cfg, name)
@@ -235,6 +262,20 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return api.MessageMergeSettings{}, err
 		}
 		return apiMessageMergeSettings(handler.MergeSettings()), nil
+	})
+	apiServer.SetMediaRetentionProvider(func() api.MediaRetentionSettings {
+		configMu.Lock()
+		defer configMu.Unlock()
+		return api.MediaRetentionSettings{Days: cfg.MediaRetention.WithDefaults().Days}
+	})
+	apiServer.SetMediaRetentionController(func(_ context.Context, settings api.MediaRetentionSettings) (api.MediaRetentionSettings, error) {
+		configMu.Lock()
+		defer configMu.Unlock()
+		cfg.MediaRetention = config.MediaRetentionConfig{Days: settings.Days}
+		if err := config.Save(cfg); err != nil {
+			return api.MediaRetentionSettings{}, err
+		}
+		return api.MediaRetentionSettings{Days: cfg.MediaRetention.Days}, nil
 	})
 	apiServer.SetPermissionsProvider(func() []api.UserPermissionInfo {
 		infos := make([]api.UserPermissionInfo, 0)
