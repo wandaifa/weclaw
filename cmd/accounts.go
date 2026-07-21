@@ -18,11 +18,14 @@ import (
 )
 
 var accountBotID string
+var accountRemoveYes bool
 
 func init() {
-	accountsCmd.AddCommand(accountsDisableCmd, accountsEnableCmd)
+	accountsCmd.AddCommand(accountsDisableCmd, accountsEnableCmd, accountsRemoveCmd)
 	accountsDisableCmd.Flags().StringVar(&accountBotID, "bot", "", "Bot ID to disable")
 	accountsEnableCmd.Flags().StringVar(&accountBotID, "bot", "", "Bot ID to enable")
+	accountsRemoveCmd.Flags().StringVar(&accountBotID, "bot", "", "Bot ID to remove")
+	accountsRemoveCmd.Flags().BoolVar(&accountRemoveYes, "yes", false, "Skip interactive confirmation")
 	rootCmd.AddCommand(accountsCmd)
 }
 
@@ -63,6 +66,21 @@ var accountsCmd = &cobra.Command{
 		if !serviceOnline {
 			fmt.Println("服务未运行；上表仅展示本地启用/停用状态。")
 		}
+
+		deleted, err := ilink.LoadDeletedAccounts()
+		if err != nil {
+			return fmt.Errorf("load deleted accounts: %w", err)
+		}
+		if len(deleted) > 0 {
+			fmt.Println()
+			deletedOut := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			fmt.Fprintln(deletedOut, "已删除账号")
+			fmt.Fprintln(deletedOut, "BOT ID\t扫码者 ID\t删除时间")
+			for _, d := range deleted {
+				fmt.Fprintf(deletedOut, "%s\t%s\t%s\n", d.BotID, d.ILinkUserID, d.RemovedAt)
+			}
+			deletedOut.Flush()
+		}
 		return nil
 	},
 }
@@ -81,6 +99,43 @@ var accountsEnableCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return setAccountEnabled(cmd.Context(), accountBotID, true)
 	},
+}
+
+var accountsRemoveCmd = &cobra.Command{
+	Use:   "remove --bot <bot_id>",
+	Short: "Permanently delete one disabled Bot's credentials (irreversible)",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return removeAccount(cmd.Context(), accountBotID, accountRemoveYes)
+	},
+}
+
+func removeAccount(ctx context.Context, botID string, skipConfirm bool) error {
+	if botID == "" {
+		return fmt.Errorf("--bot is required")
+	}
+	if !skipConfirm {
+		fmt.Printf("此操作不可恢复：将永久删除 Bot %s 的凭证。输入完整 bot_id 确认：\n", botID)
+		var typed string
+		if _, err := fmt.Scanln(&typed); err != nil {
+			return fmt.Errorf("read confirmation: %w", err)
+		}
+		if typed != botID {
+			return fmt.Errorf("输入不匹配，已取消")
+		}
+	}
+	if err := ilink.RemoveAccount(botID); err != nil {
+		return err
+	}
+	running, err := reloadConfiguredAccounts(ctx)
+	if err != nil {
+		return fmt.Errorf("Bot %s 已删除，但热重载失败：%w；请执行 weclaw restart", botID, err)
+	}
+	if running {
+		fmt.Printf("Bot %s 已永久删除，并已更新运行中的服务。\n", botID)
+	} else {
+		fmt.Printf("Bot %s 已永久删除。\n", botID)
+	}
+	return nil
 }
 
 func setAccountEnabled(ctx context.Context, botID string, enabled bool) error {
