@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -124,6 +125,121 @@ func TestHandleAccountStateDelegatesToController(t *testing.T) {
 	}
 	if got := len(server.clientsSnapshot()); got != 1 {
 		t.Fatalf("client count = %d, want 1", got)
+	}
+}
+
+func TestHandleAccountRemoveDelegatesToController(t *testing.T) {
+	called := ""
+	server := NewServer(nil, "")
+	server.SetAccountRemoveController(func(_ context.Context, botID string) (AccountReloadResult, error) {
+		called = botID
+		return AccountReloadResult{Clients: []*ilink.Client{ilink.NewClient(&ilink.Credentials{ILinkBotID: "other@im.bot"})}}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, AccountRemovePath, bytes.NewBufferString(`{"bot_id":"bot@im.bot"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleAccountRemove(resp, req)
+	if resp.Code != http.StatusOK || called != "bot@im.bot" {
+		t.Fatalf("status = %d, called = %q: %s", resp.Code, called, resp.Body.String())
+	}
+	if got := len(server.clientsSnapshot()); got != 1 {
+		t.Fatalf("client count = %d, want 1", got)
+	}
+}
+
+func TestHandleAccountRemoveRejectsNonLoopback(t *testing.T) {
+	called := false
+	server := NewServer(nil, "")
+	server.SetAccountRemoveController(func(context.Context, string) (AccountReloadResult, error) {
+		called = true
+		return AccountReloadResult{}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, AccountRemovePath, bytes.NewBufferString(`{"bot_id":"bot@im.bot"}`))
+	req.RemoteAddr = "192.0.2.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleAccountRemove(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.Code)
+	}
+	if called {
+		t.Fatal("controller should not be called for a non-loopback request")
+	}
+}
+
+func TestHandleAccountRemoveRequiresBotID(t *testing.T) {
+	server := NewServer(nil, "")
+	server.SetAccountRemoveController(func(context.Context, string) (AccountReloadResult, error) {
+		return AccountReloadResult{}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, AccountRemovePath, bytes.NewBufferString(`{}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleAccountRemove(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Code)
+	}
+}
+
+func TestHandleAccountRemoveSurfacesControllerError(t *testing.T) {
+	server := NewServer(nil, "")
+	server.SetAccountRemoveController(func(context.Context, string) (AccountReloadResult, error) {
+		return AccountReloadResult{}, fmt.Errorf("account must be disabled before it can be removed")
+	})
+	req := httptest.NewRequest(http.MethodPost, AccountRemovePath, bytes.NewBufferString(`{"bot_id":"bot@im.bot"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleAccountRemove(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Code)
+	}
+	if !strings.Contains(resp.Body.String(), "must be disabled") {
+		t.Fatalf("body = %q, want it to surface the controller error", resp.Body.String())
+	}
+}
+
+func TestHandleAccountRemoveUnavailableWithoutController(t *testing.T) {
+	server := NewServer(nil, "")
+	req := httptest.NewRequest(http.MethodPost, AccountRemovePath, bytes.NewBufferString(`{"bot_id":"bot@im.bot"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleAccountRemove(resp, req)
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", resp.Code)
+	}
+}
+
+func TestHandleDeletedAccountsReturnsRecords(t *testing.T) {
+	server := NewServer(nil, "")
+	server.SetDeletedAccountsProvider(func() ([]ilink.DeletedAccount, error) {
+		return []ilink.DeletedAccount{{BotID: "bot@im.bot", ILinkUserID: "scanner@im.wechat", RemovedAt: "2026-07-22T10:00:00Z"}}, nil
+	})
+	req := httptest.NewRequest(http.MethodGet, AccountsDeletedPath, nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleDeletedAccounts(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.Code, resp.Body.String())
+	}
+	var body struct {
+		DeletedAccounts []ilink.DeletedAccount `json:"deleted_accounts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.DeletedAccounts) != 1 || body.DeletedAccounts[0].BotID != "bot@im.bot" {
+		t.Fatalf("deleted accounts = %+v", body.DeletedAccounts)
+	}
+}
+
+func TestHandleDeletedAccountsRejectsNonLoopback(t *testing.T) {
+	server := NewServer(nil, "")
+	server.SetDeletedAccountsProvider(func() ([]ilink.DeletedAccount, error) { return nil, nil })
+	req := httptest.NewRequest(http.MethodGet, AccountsDeletedPath, nil)
+	req.RemoteAddr = "192.0.2.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleDeletedAccounts(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.Code)
 	}
 }
 

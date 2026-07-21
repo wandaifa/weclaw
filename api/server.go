@@ -18,6 +18,8 @@ const (
 	AccountReloadPath    = "/api/internal/accounts/reload"
 	AccountsPath         = "/api/internal/accounts"
 	AccountStatePath     = "/api/internal/accounts/state"
+	AccountRemovePath    = "/api/internal/accounts/remove"
+	AccountsDeletedPath  = "/api/internal/accounts/deleted"
 	MessageMergePath     = "/api/internal/settings/message-merge"
 	MediaRetentionPath   = "/api/internal/settings/media-retention"
 	PermissionsPath      = "/api/internal/permissions"
@@ -46,6 +48,14 @@ type AccountStatusProvider func() []AccountStatus
 
 // AccountStateController changes one Bot's enabled state and reloads accounts.
 type AccountStateController func(context.Context, string, bool) (AccountReloadResult, error)
+
+// AccountRemoveController permanently deletes one disabled Bot's
+// credentials and reloads accounts.
+type AccountRemoveController func(context.Context, string) (AccountReloadResult, error)
+
+// DeletedAccountsProvider returns every account whose credentials were
+// permanently removed, for a view-only "deleted accounts" listing.
+type DeletedAccountsProvider func() ([]ilink.DeletedAccount, error)
 
 // MessageMergeSettings is the JSON-safe representation of message coalescing settings.
 type MessageMergeSettings struct {
@@ -108,6 +118,8 @@ type Server struct {
 	reloader          AccountReloader
 	status            AccountStatusProvider
 	state             AccountStateController
+	remove            AccountRemoveController
+	deletedAccounts   DeletedAccountsProvider
 	merge             MessageMergeProvider
 	setMerge          MessageMergeController
 	mediaRetention    MediaRetentionProvider
@@ -145,6 +157,20 @@ func (s *Server) SetAccountStateController(controller AccountStateController) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.state = controller
+}
+
+// SetAccountRemoveController enables permanent account deletion through the loopback API.
+func (s *Server) SetAccountRemoveController(controller AccountRemoveController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.remove = controller
+}
+
+// SetDeletedAccountsProvider exposes the deleted-accounts tombstone list through the loopback-only endpoint.
+func (s *Server) SetDeletedAccountsProvider(provider DeletedAccountsProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletedAccounts = provider
 }
 
 func (s *Server) SetMessageMergeProvider(provider MessageMergeProvider) {
@@ -208,6 +234,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(AccountReloadPath, s.handleAccountReload)
 	mux.HandleFunc(AccountsPath, s.handleAccounts)
 	mux.HandleFunc(AccountStatePath, s.handleAccountState)
+	mux.HandleFunc(AccountRemovePath, s.handleAccountRemove)
+	mux.HandleFunc(AccountsDeletedPath, s.handleDeletedAccounts)
 	mux.HandleFunc(MessageMergePath, s.handleMessageMerge)
 	mux.HandleFunc(MediaRetentionPath, s.handleMediaRetention)
 	mux.HandleFunc(PermissionsPath, s.handlePermissions)
@@ -401,6 +429,74 @@ func (s *Server) handleAccountState(w http.ResponseWriter, r *http.Request) {
 		"disabled": req.Disabled,
 		"accounts": len(result.Clients),
 	})
+}
+
+// AccountRemoveRequest is the JSON body for POST /api/internal/accounts/remove.
+type AccountRemoveRequest struct {
+	BotID string `json:"bot_id"`
+}
+
+func (s *Server) handleAccountRemove(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	var req AccountRemoveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.BotID == "" {
+		http.Error(w, "bot_id is required", http.StatusBadRequest)
+		return
+	}
+	s.mu.RLock()
+	controller := s.remove
+	s.mu.RUnlock()
+	if controller == nil {
+		http.Error(w, "account removal is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	result, err := controller(r.Context(), req.BotID)
+	if err != nil {
+		log.Printf("[api] account removal failed: %v", err)
+		http.Error(w, "account removal failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.mu.Lock()
+	s.clients = append([]*ilink.Client(nil), result.Clients...)
+	s.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"bot_id":   req.BotID,
+		"accounts": len(result.Clients),
+	})
+}
+
+func (s *Server) handleDeletedAccounts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider := s.deletedAccounts
+	s.mu.RUnlock()
+	if provider == nil {
+		http.Error(w, "deleted accounts are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	deleted, err := provider()
+	if err != nil {
+		log.Printf("[api] load deleted accounts failed: %v", err)
+		http.Error(w, "load deleted accounts failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string][]ilink.DeletedAccount{"deleted_accounts": deleted})
 }
 
 func (s *Server) handleMessageMerge(w http.ResponseWriter, r *http.Request) {

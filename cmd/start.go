@@ -370,6 +370,21 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 		return api.AccountReloadResult{Clients: result.Clients, Added: result.Added, Replaced: result.Replaced}, nil
 	})
+	apiServer.SetAccountRemoveController(func(ctx context.Context, botID string) (api.AccountReloadResult, error) {
+		if err := ilink.RemoveAccount(botID); err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		credentials, err := ilink.LoadAllCredentials()
+		if err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		result, err := accountManager.Reload(credentials)
+		if err != nil {
+			return api.AccountReloadResult{}, err
+		}
+		return api.AccountReloadResult{Clients: result.Clients, Added: result.Added, Replaced: result.Replaced}, nil
+	})
+	apiServer.SetDeletedAccountsProvider(ilink.LoadDeletedAccounts)
 	apiServer.SetAccountReloader(func(context.Context) (api.AccountReloadResult, error) {
 		credentials, err := ilink.LoadAllCredentials()
 		if err != nil {
