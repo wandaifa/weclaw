@@ -6,7 +6,6 @@ package config
 // permissions API or a config file edit.
 var ownerUserIDs = map[string]bool{
 	"o9cq80ykt-8P0b7crARaJZtX1T9g@im.wechat": true, // personal WeChat
-	"o9cq803depA5jxiybGv2PIr2ASjQ@im.wechat": true, // work WeChat
 }
 
 // IsOwner reports whether userID is the project owner.

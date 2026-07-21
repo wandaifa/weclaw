@@ -189,7 +189,7 @@ func TestIsOwner(t *testing.T) {
 	if IsOwner("") {
 		t.Fatal("IsOwner should reject empty string")
 	}
-	if len(OwnerUserIDs()) != 2 {
-		t.Fatalf("OwnerUserIDs() len = %d, want 2", len(OwnerUserIDs()))
+	if len(OwnerUserIDs()) != 1 {
+		t.Fatalf("OwnerUserIDs() len = %d, want 1", len(OwnerUserIDs()))
 	}
 }
