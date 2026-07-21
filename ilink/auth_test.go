@@ -10,8 +10,8 @@ import (
 
 func TestLoadCredentialsAtSkipsDisabledAccounts(t *testing.T) {
 	dir := t.TempDir()
-	writeCredentialsFixture(t, dir, "enabled", Credentials{BotToken: "token-1", ILinkBotID: "enabled@im.bot", ILinkUserID: "scanner-1@im.wechat"})
-	writeCredentialsFixture(t, dir, "disabled", Credentials{BotToken: "token-2", ILinkBotID: "disabled@im.bot", ILinkUserID: "scanner-2@im.wechat"})
+	writeCredentialsFixture(t, dir, Credentials{BotToken: "token-1", ILinkBotID: "enabled@im.bot", ILinkUserID: "scanner-1@im.wechat"})
+	writeCredentialsFixture(t, dir, Credentials{BotToken: "token-2", ILinkBotID: "disabled@im.bot", ILinkUserID: "scanner-2@im.wechat"})
 	if err := os.WriteFile(filepath.Join(dir, NormalizeAccountID("disabled@im.bot")+".disabled"), []byte("disabled\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestLoadCredentialsAtSkipsDisabledAccounts(t *testing.T) {
 	}
 }
 
-func writeCredentialsFixture(t *testing.T, dir, name string, creds Credentials) {
+func writeCredentialsFixture(t *testing.T, dir string, creds Credentials) {
 	t.Helper()
 	data, err := json.Marshal(creds)
 	if err != nil {
@@ -52,7 +52,7 @@ func writeCredentialsFixture(t *testing.T, dir, name string, creds Credentials) 
 
 func TestRemoveAccountRequiresDisabledFirst(t *testing.T) {
 	dir := t.TempDir()
-	writeCredentialsFixture(t, dir, "active", Credentials{BotToken: "token-1", ILinkBotID: "active@im.bot", ILinkUserID: "scanner@im.wechat"})
+	writeCredentialsFixture(t, dir, Credentials{BotToken: "token-1", ILinkBotID: "active@im.bot", ILinkUserID: "scanner@im.wechat"})
 
 	if err := removeAccountAt(dir, "active@im.bot"); err == nil {
 		t.Fatal("expected error when account is not disabled")
@@ -71,7 +71,7 @@ func TestRemoveAccountErrorsWhenNotFound(t *testing.T) {
 
 func TestRemoveAccountDeletesFilesAndWritesTombstone(t *testing.T) {
 	dir := t.TempDir()
-	writeCredentialsFixture(t, dir, "gone", Credentials{BotToken: "super-secret-token", ILinkBotID: "gone@im.bot", ILinkUserID: "scanner@im.wechat"})
+	writeCredentialsFixture(t, dir, Credentials{BotToken: "super-secret-token", ILinkBotID: "gone@im.bot", ILinkUserID: "scanner@im.wechat"})
 	id := NormalizeAccountID("gone@im.bot")
 	if err := os.WriteFile(filepath.Join(dir, id+".disabled"), []byte("disabled\n"), 0o600); err != nil {
 		t.Fatal(err)

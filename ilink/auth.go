@@ -291,38 +291,17 @@ func removeAccountAt(dir, botID string) error {
 	if botID == "" {
 		return fmt.Errorf("bot ID is required")
 	}
-
-	// Find the credential file for this bot ID (scan all .json files)
-	entries, err := os.ReadDir(dir)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read accounts dir: %w", err)
-	}
-
-	var credPath string
-	var creds Credentials
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
-		if err != nil {
-			continue
-		}
-		var c Credentials
-		if json.Unmarshal(data, &c) == nil && c.ILinkBotID == botID {
-			credPath = filepath.Join(dir, e.Name())
-			creds = c
-			break
-		}
-	}
-
-	if credPath == "" {
-		return fmt.Errorf("bot_id %q is not saved locally", botID)
-	}
-
-	// Check if account is disabled
 	id := NormalizeAccountID(botID)
+	credPath := filepath.Join(dir, id+".json")
 	disabledPath := filepath.Join(dir, id+".disabled")
+
+	data, err := os.ReadFile(credPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("bot_id %q is not saved locally", botID)
+		}
+		return fmt.Errorf("read credentials: %w", err)
+	}
 	if _, err := os.Stat(disabledPath); err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("account must be disabled before it can be removed")
@@ -330,7 +309,11 @@ func removeAccountAt(dir, botID string) error {
 		return fmt.Errorf("check disabled marker: %w", err)
 	}
 
-	// Write tombstone
+	var creds Credentials
+	if err := json.Unmarshal(data, &creds); err != nil {
+		return fmt.Errorf("parse credentials: %w", err)
+	}
+
 	deletedDir := filepath.Join(dir, "deleted")
 	if err := os.MkdirAll(deletedDir, 0o700); err != nil {
 		return fmt.Errorf("create deleted accounts dir: %w", err)
