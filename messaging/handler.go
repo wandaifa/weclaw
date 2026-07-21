@@ -2,6 +2,8 @@ package messaging
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/google/uuid"
 )
@@ -33,11 +36,12 @@ type AgentMeta struct {
 type Handler struct {
 	mu            sync.RWMutex
 	defaultName   string
-	userAgents    map[string]string      // user ID -> selected agent; falls back to defaultName
-	agents        map[string]agent.Agent // name -> running agent
-	agentMetas    []AgentMeta            // all configured agents (for /status)
-	agentWorkDirs map[string]string      // agent name -> configured/runtime cwd
-	customAliases map[string]string      // custom alias -> agent name (from config)
+	userAgents    map[string]string                // user ID -> selected agent; falls back to defaultName
+	permissions   map[string]config.UserPermission // user ID -> sandbox tier (non-owner only)
+	agents        map[string]agent.Agent           // name -> running agent
+	agentMetas    []AgentMeta                      // all configured agents (for /status)
+	agentWorkDirs map[string]string                // agent name -> configured/runtime cwd
+	customAliases map[string]string                // custom alias -> agent name (from config)
 	factory       AgentFactory
 	saveUserAgent SaveUserAgentFunc
 	contextTokens sync.Map // map[userID]contextToken
@@ -48,6 +52,14 @@ type Handler struct {
 	chatQueues    sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
 	mergeMu       sync.RWMutex
 	mergeSettings MergeSettings
+	usageMu       sync.Mutex
+	usage         map[string]*dailyUsage // user ID -> today's message count (non-owner only, in-memory)
+}
+
+// dailyUsage tracks one non-owner user's message count for the current local day.
+type dailyUsage struct {
+	date  string
+	count int
 }
 
 type pendingMedia struct {
@@ -93,10 +105,12 @@ func NewHandler(factory AgentFactory, saveUserAgent SaveUserAgentFunc) *Handler 
 	return &Handler{
 		agents:        make(map[string]agent.Agent),
 		userAgents:    make(map[string]string),
+		permissions:   make(map[string]config.UserPermission),
 		agentWorkDirs: make(map[string]string),
 		factory:       factory,
 		saveUserAgent: saveUserAgent,
 		mergeSettings: DefaultMergeSettings(),
+		usage:         make(map[string]*dailyUsage),
 	}
 }
 
@@ -206,6 +220,84 @@ func (h *Handler) SetUserAgents(selections map[string]string) {
 			h.userAgents[userID] = name
 		}
 	}
+}
+
+// SetUserPermissions restores persisted non-owner sandbox tiers at startup.
+func (h *Handler) SetUserPermissions(perms map[string]config.UserPermission) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.permissions = make(map[string]config.UserPermission, len(perms))
+	for userID, perm := range perms {
+		if userID != "" {
+			h.permissions[userID] = perm
+		}
+	}
+}
+
+// SetUserPermission updates one non-owner user's sandbox tier immediately
+// (called by the internal permissions API after saving to config).
+func (h *Handler) SetUserPermission(userID string, perm config.UserPermission) {
+	h.mu.Lock()
+	h.permissions[userID] = perm
+	h.mu.Unlock()
+}
+
+// PermissionSnapshot describes one non-owner user's configured tier, for the
+// internal permissions API.
+type PermissionSnapshot struct {
+	UserID     string
+	Level      config.PermissionLevel
+	DailyLimit int
+}
+
+// PermissionsSnapshot lists every non-owner user with an explicitly
+// configured sandbox tier (loaded from config at startup or set via the
+// internal API since). Users who have never been configured are not listed
+// here — they still get the fail-closed read-only default in
+// conversationPolicy, but the wx-clawbot viewer merges this list against its
+// own broader "every user seen in the logs" view to fill in that default.
+func (h *Handler) PermissionsSnapshot() []PermissionSnapshot {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := make([]PermissionSnapshot, 0, len(h.permissions))
+	for userID, perm := range h.permissions {
+		out = append(out, PermissionSnapshot{UserID: userID, Level: perm.Level, DailyLimit: perm.DailyLimit})
+	}
+	return out
+}
+
+// UsageEntry is one non-owner user's message count for the current local day.
+type UsageEntry struct {
+	UserID string
+	Date   string
+	Count  int
+	Limit  int
+}
+
+// UsageSnapshot returns today's quota usage for every non-owner user with
+// activity so far, for the internal permissions API.
+func (h *Handler) UsageSnapshot() []UsageEntry {
+	h.mu.RLock()
+	perms := make(map[string]config.UserPermission, len(h.permissions))
+	for userID, perm := range h.permissions {
+		perms[userID] = perm
+	}
+	h.mu.RUnlock()
+
+	limitFor := func(userID string) int {
+		if perm, ok := perms[userID]; ok && perm.DailyLimit > 0 {
+			return perm.DailyLimit
+		}
+		return config.DefaultDailyMessageLimit
+	}
+
+	h.usageMu.Lock()
+	defer h.usageMu.Unlock()
+	out := make([]UsageEntry, 0, len(h.usage))
+	for userID, u := range h.usage {
+		out = append(out, UsageEntry{UserID: userID, Date: u.date, Count: u.count, Limit: limitFor(userID)})
+	}
+	return out
 }
 
 // getAgent returns a running agent by name, or starts it on demand via factory.
@@ -555,6 +647,12 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 	// Generate a clientID for this reply (used to correlate typing → finish)
 	clientID := NewClientID()
 
+	// Only the hardcoded owner can switch agents, change the shared cwd, or see
+	// those capabilities in /help. Everyone else is confined to their own
+	// sandboxed conversation (see conversationPolicy) and never learns these
+	// commands exist.
+	owner := config.IsOwner(msg.FromUserID)
+
 	// Intercept URLs: save to Linkhoard directly without AI agent
 	trimmed := strings.TrimSpace(text)
 	if h.saveDir != "" && IsURL(trimmed) {
@@ -578,13 +676,13 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 
 	// Built-in commands (no typing needed)
 	if trimmed == "/info" {
-		reply := h.buildStatus(msg.FromUserID)
+		reply := h.buildStatus(msg.FromUserID, owner)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
 		return
 	} else if trimmed == "/help" {
-		reply := buildHelpText()
+		reply := buildHelpText(owner)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
@@ -595,11 +693,20 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
 		return
-	} else if strings.HasPrefix(trimmed, "/cwd") {
+	} else if owner && strings.HasPrefix(trimmed, "/cwd") {
 		reply := h.handleCwd(trimmed, msg.FromUserID)
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 		}
+		return
+	}
+
+	// Non-owners never reach the agent-switch/broadcast routing below: /xxx or
+	// @xxx prefixes (including "/cwd" for them) are just ordinary chat text
+	// sent to their locked-down agent. This keeps the switching feature and
+	// its existence entirely invisible to them.
+	if !owner {
+		h.sendToDefaultAgent(ctx, client, msg, text, clientID)
 		return
 	}
 
@@ -671,6 +778,13 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 
 // sendToDefaultAgent sends the message to the default agent and replies.
 func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, text, clientID string) {
+	if !h.consumeQuota(msg.FromUserID) {
+		if err := SendTextReply(ctx, client, msg.FromUserID, quotaExceededReply(), msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send quota reply to %s: %v", msg.FromUserID, err)
+		}
+		return
+	}
+
 	go func() {
 		if typingErr := SendTypingState(ctx, client, msg.FromUserID, msg.ContextToken); typingErr != nil {
 			log.Printf("[handler] failed to send typing state: %v", typingErr)
@@ -944,6 +1058,10 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 
 // chatWithAgent sends a message to an agent and returns the reply, with logging.
 func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string) (string, error) {
+	if pa, ok := ag.(agent.PolicyAwareAgent); ok {
+		pa.SetConversationPolicy(userID, h.conversationPolicy(userID))
+	}
+
 	info := ag.Info()
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
@@ -958,6 +1076,99 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 
 	log.Printf("[handler] agent replied (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
 	return reply, nil
+}
+
+// conversationPolicy resolves the sandbox tier for one WeChat user. Owners get
+// today's unrestricted behavior; everyone else is confined to a private
+// directory, read-only unless explicitly upgraded via the permissions API.
+func (h *Handler) conversationPolicy(userID string) agent.ConversationPolicy {
+	if config.IsOwner(userID) {
+		return agent.ConversationPolicy{Level: agent.SandboxFullAccess}
+	}
+
+	h.mu.RLock()
+	perm, ok := h.permissions[userID]
+	h.mu.RUnlock()
+
+	level := agent.SandboxReadOnly
+	if ok && perm.Level == config.PermissionWorkspaceWrite {
+		level = agent.SandboxWorkspaceWrite
+	}
+	dir := userSandboxDir(userID)
+	return agent.ConversationPolicy{Level: level, Cwd: dir, WritableRoots: []string{dir}}
+}
+
+// sanitizeUserIDForPath turns an externally-supplied WeChat user ID into a
+// safe directory name: keep only [A-Za-z0-9_-], cap the length, and append a
+// hash suffix so two IDs that collide after sanitization stay separate.
+func sanitizeUserIDForPath(userID string) string {
+	var b strings.Builder
+	for _, r := range userID {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	clean := b.String()
+	if len(clean) > 80 {
+		clean = clean[:80]
+	}
+	sum := sha256.Sum256([]byte(userID))
+	return clean + "-" + hex.EncodeToString(sum[:4])
+}
+
+// userSandboxDir returns (and lazily creates) the private directory a
+// non-owner user's agent conversations are confined to.
+func userSandboxDir(userID string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.TempDir()
+	}
+	dir := filepath.Join(home, ".weclaw", "workspaces", sanitizeUserIDForPath(userID))
+	os.MkdirAll(dir, 0o700)
+	return dir
+}
+
+// dailyLimit returns the configured per-day message cap for a non-owner user.
+// Callers must hold h.mu (RLock or Lock).
+func (h *Handler) dailyLimit(userID string) int {
+	if perm, ok := h.permissions[userID]; ok && perm.DailyLimit > 0 {
+		return perm.DailyLimit
+	}
+	return config.DefaultDailyMessageLimit
+}
+
+// consumeQuota reports whether userID may send one more message today,
+// incrementing its counter if so. Owners are never limited. The counter is
+// in-memory only and resets whenever the local date changes.
+func (h *Handler) consumeQuota(userID string) bool {
+	if config.IsOwner(userID) {
+		return true
+	}
+	today := time.Now().Format("2006-01-02")
+
+	h.mu.RLock()
+	limit := h.dailyLimit(userID)
+	h.mu.RUnlock()
+
+	h.usageMu.Lock()
+	defer h.usageMu.Unlock()
+	u, ok := h.usage[userID]
+	if !ok || u.date != today {
+		u = &dailyUsage{date: today}
+		h.usage[userID] = u
+	}
+	if u.count >= limit {
+		return false
+	}
+	u.count++
+	return true
+}
+
+func quotaExceededReply() string {
+	return "今日额度已用完，请明天再试。"
 }
 
 // switchUserAgent selects an agent for one user and persists that selection.
@@ -1079,28 +1290,69 @@ func (h *Handler) handleCwd(trimmed, userID string) string {
 }
 
 // buildStatus returns a short status string showing this user's selected agent.
-func (h *Handler) buildStatus(userID string) string {
+func (h *Handler) buildStatus(userID string, owner bool) string {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
-
 	name := h.defaultName
 	if selected, ok := h.userAgents[userID]; ok {
 		name = selected
 	}
+	ag := h.agents[name]
+	if !owner {
+		perm, hasPerm := h.permissions[userID]
+		limit := h.dailyLimit(userID)
+		h.mu.RUnlock()
+		return h.buildNonOwnerStatus(userID, ag, perm, hasPerm, limit)
+	}
+	defer h.mu.RUnlock()
+
 	if name == "" {
 		return "agent: none (echo mode)"
 	}
-
-	ag, ok := h.agents[name]
-	if !ok {
+	if ag == nil {
 		return fmt.Sprintf("agent: %s (not started)", name)
 	}
-
 	info := ag.Info()
 	return fmt.Sprintf("agent: %s\ntype: %s\nmodel: %s", name, info.Type, info.Model)
 }
 
-func buildHelpText() string {
+// buildNonOwnerStatus reports only what a non-owner user is allowed to see:
+// the model name, their permission tier, and today's remaining quota — never
+// internal agent type/command details or the fact that switching exists.
+func (h *Handler) buildNonOwnerStatus(userID string, ag agent.Agent, perm config.UserPermission, hasPerm bool, limit int) string {
+	model := "未知"
+	if ag != nil {
+		if m := ag.Info().Model; m != "" {
+			model = m
+		}
+	}
+
+	levelLabel := "只读"
+	if hasPerm && perm.Level == config.PermissionWorkspaceWrite {
+		levelLabel = "可读写"
+	}
+
+	today := time.Now().Format("2006-01-02")
+	h.usageMu.Lock()
+	used := 0
+	if u, ok := h.usage[userID]; ok && u.date == today {
+		used = u.count
+	}
+	h.usageMu.Unlock()
+	remaining := limit - used
+	if remaining < 0 {
+		remaining = 0
+	}
+
+	return fmt.Sprintf("模型: %s\n权限: %s\n今日剩余次数: %d/%d", model, levelLabel, remaining, limit)
+}
+
+func buildHelpText(owner bool) string {
+	if !owner {
+		return `Available commands:
+/new or /clear - Start a new session
+/info - Show current agent info
+/help - Show this help message`
+	}
 	return `Available commands:
 @agent or /agent - Switch agent for the current WeChat user
 @agent msg or /agent msg - Send to a specific agent

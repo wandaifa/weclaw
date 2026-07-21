@@ -1,21 +1,112 @@
 package messaging
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/fastclaw-ai/weclaw/agent"
+	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 )
 
 func newTestHandler() *Handler {
 	return &Handler{
-		agents:     make(map[string]agent.Agent),
-		userAgents: make(map[string]string),
+		agents:      make(map[string]agent.Agent),
+		userAgents:  make(map[string]string),
+		permissions: make(map[string]config.UserPermission),
+		usage:       make(map[string]*dailyUsage),
+	}
+}
+
+// recordingAgent is a minimal agent.Agent test double that records every
+// message it receives without doing any real work.
+type recordingAgent struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (a *recordingAgent) Chat(_ context.Context, _ string, message string) (string, error) {
+	a.mu.Lock()
+	a.calls = append(a.calls, message)
+	a.mu.Unlock()
+	return "ok", nil
+}
+func (a *recordingAgent) ResetSession(_ context.Context, _ string) (string, error) { return "", nil }
+func (a *recordingAgent) Info() agent.AgentInfo {
+	return agent.AgentInfo{Name: "fake", Type: "fake", Model: "fake-model"}
+}
+func (a *recordingAgent) SetCwd(string) {}
+
+func (a *recordingAgent) callsSnapshot() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.calls...)
+}
+
+// newFakeIlinkServer stubs the three iLink endpoints a normal chat turn
+// touches (getconfig for the typing ticket, sendtyping, sendmessage for the
+// reply) so tests can exercise HandleMessage end-to-end without hitting the
+// real WeChat bot API. It records every reply text sent via sendmessage.
+func newFakeIlinkServer(t *testing.T) (*httptest.Server, *sentReplies) {
+	t.Helper()
+	sent := &sentReplies{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ilink/bot/getconfig", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ret": 0, "typing_ticket": "tk"})
+	})
+	mux.HandleFunc("/ilink/bot/sendtyping", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]interface{}{"ret": 0})
+	})
+	mux.HandleFunc("/ilink/bot/sendmessage", func(w http.ResponseWriter, r *http.Request) {
+		var req ilink.SendMessageRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		text := ""
+		if len(req.Msg.ItemList) > 0 && req.Msg.ItemList[0].TextItem != nil {
+			text = req.Msg.ItemList[0].TextItem.Text
+		}
+		sent.add(text)
+		json.NewEncoder(w).Encode(map[string]interface{}{"ret": 0})
+	})
+	return httptest.NewServer(mux), sent
+}
+
+type sentReplies struct {
+	mu    sync.Mutex
+	texts []string
+}
+
+func (s *sentReplies) add(text string) {
+	s.mu.Lock()
+	s.texts = append(s.texts, text)
+	s.mu.Unlock()
+}
+
+func (s *sentReplies) snapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.texts...)
+}
+
+func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatal("condition not met before timeout")
 	}
 }
 
@@ -135,7 +226,7 @@ func TestResolveAlias(t *testing.T) {
 }
 
 func TestBuildHelpText(t *testing.T) {
-	text := buildHelpText()
+	text := buildHelpText(true)
 	if text == "" {
 		t.Error("help text is empty")
 	}
@@ -144,6 +235,18 @@ func TestBuildHelpText(t *testing.T) {
 	}
 	if !strings.Contains(text, "/help") {
 		t.Error("help text should mention /help")
+	}
+}
+
+func TestBuildHelpTextHidesAgentSwitchForNonOwner(t *testing.T) {
+	text := buildHelpText(false)
+	for _, hidden := range []string{"@agent", "/cwd", "Aliases:"} {
+		if strings.Contains(text, hidden) {
+			t.Errorf("non-owner help text should not mention %q, got: %s", hidden, text)
+		}
+	}
+	if !strings.Contains(text, "/info") || !strings.Contains(text, "/help") {
+		t.Error("non-owner help text should still mention /info and /help")
 	}
 }
 
@@ -407,5 +510,192 @@ func TestSafeInboundMediaNameAddsVideoExt(t *testing.T) {
 	got := safeInboundMediaName("", "video", "video/mp4")
 	if got != "video.mp4" {
 		t.Fatalf("safeInboundMediaName() = %q, want video.mp4", got)
+	}
+}
+
+func newTestMessage(userID, text string, messageID int64) ilink.WeixinMessage {
+	return ilink.WeixinMessage{
+		FromUserID:   userID,
+		MessageID:    messageID,
+		MessageType:  ilink.MessageTypeUser,
+		MessageState: ilink.MessageStateFinish,
+		ItemList: []ilink.MessageItem{
+			{Type: ilink.ItemTypeText, TextItem: &ilink.TextItem{Text: text}},
+		},
+	}
+}
+
+func TestNonOwnerAgentSwitchPrefixIsPlainText(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	msg := newTestMessage("non-owner-test@im.wechat", "/codex hello", 1)
+	h.HandleMessage(context.Background(), client, msg)
+
+	waitFor(t, 2*time.Second, func() bool { return len(fake.callsSnapshot()) > 0 })
+	calls := fake.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "/codex hello" {
+		t.Fatalf("non-owner /codex text should reach the default agent verbatim, got %v", calls)
+	}
+}
+
+func TestNonOwnerCwdIsPlainText(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+	h.SetAgentWorkDirs(map[string]string{"codex": "/original/cwd"})
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	msg := newTestMessage("non-owner-test@im.wechat", "/cwd /tmp/should-not-apply", 2)
+	h.HandleMessage(context.Background(), client, msg)
+
+	waitFor(t, 2*time.Second, func() bool { return len(fake.callsSnapshot()) > 0 })
+	calls := fake.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "/cwd /tmp/should-not-apply" {
+		t.Fatalf("non-owner /cwd should be forwarded as plain text, got %v", calls)
+	}
+}
+
+func TestOwnerCwdStillWorks(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+	dir := t.TempDir()
+
+	ownerID := config.OwnerUserIDs()[0]
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	msg := newTestMessage(ownerID, "/cwd "+dir, 3)
+	h.HandleMessage(context.Background(), client, msg)
+
+	waitFor(t, 2*time.Second, func() bool {
+		h.mu.RLock()
+		defer h.mu.RUnlock()
+		return h.agentWorkDirs["codex"] == dir
+	})
+	if len(fake.callsSnapshot()) != 0 {
+		t.Fatalf("owner /cwd should not be forwarded to the agent, got %v", fake.callsSnapshot())
+	}
+}
+
+func TestQuotaExceededBlocksNonOwnerBeforeAgentCall(t *testing.T) {
+	srv, sent := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+	h.SetUserPermission("quota-test@im.wechat", config.UserPermission{Level: config.PermissionReadOnly, DailyLimit: 1})
+	// Plain text without a "/" or "@" prefix is subject to the consecutive-message
+	// merge wait; use the minimum allowed idle delay so the test doesn't sit
+	// through the 3s default before each turn dispatches.
+	if err := h.SetMergeSettings(MergeSettings{IdleDelay: time.Second, MaxWait: time.Second, MaxMessages: 10, MaxChars: 4000}); err != nil {
+		t.Fatalf("SetMergeSettings: %v", err)
+	}
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+
+	h.HandleMessage(context.Background(), client, newTestMessage("quota-test@im.wechat", "first", 10))
+	waitFor(t, 4*time.Second, func() bool { return len(fake.callsSnapshot()) == 1 })
+
+	h.HandleMessage(context.Background(), client, newTestMessage("quota-test@im.wechat", "second", 11))
+	waitFor(t, 4*time.Second, func() bool { return len(sent.snapshot()) >= 2 })
+
+	if calls := fake.callsSnapshot(); len(calls) != 1 {
+		t.Fatalf("second message should not reach the agent once quota is exhausted, got calls=%v", calls)
+	}
+	found := false
+	for _, text := range sent.snapshot() {
+		if text == quotaExceededReply() {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected quota exceeded reply to be sent, got %v", sent.snapshot())
+	}
+}
+
+func TestQuotaDoesNotLimitOwner(t *testing.T) {
+	h := newTestHandler()
+	ownerID := config.OwnerUserIDs()[0]
+	for i := 0; i < 500; i++ {
+		if !h.consumeQuota(ownerID) {
+			t.Fatalf("owner should never be quota-limited, blocked at attempt %d", i)
+		}
+	}
+}
+
+func TestConversationPolicyOwnerVsNonOwner(t *testing.T) {
+	h := newTestHandler()
+	ownerID := config.OwnerUserIDs()[0]
+
+	ownerPolicy := h.conversationPolicy(ownerID)
+	if ownerPolicy.Level != agent.SandboxFullAccess {
+		t.Fatalf("owner policy level = %v, want full_access", ownerPolicy.Level)
+	}
+
+	readOnly := h.conversationPolicy("stranger@im.wechat")
+	if readOnly.Level != agent.SandboxReadOnly {
+		t.Fatalf("default non-owner policy level = %v, want read_only", readOnly.Level)
+	}
+	if readOnly.Cwd == "" || len(readOnly.WritableRoots) != 1 || readOnly.WritableRoots[0] != readOnly.Cwd {
+		t.Fatalf("non-owner policy should have a private cwd/writable root, got %+v", readOnly)
+	}
+
+	h.SetUserPermission("upgraded@im.wechat", config.UserPermission{Level: config.PermissionWorkspaceWrite})
+	upgraded := h.conversationPolicy("upgraded@im.wechat")
+	if upgraded.Level != agent.SandboxWorkspaceWrite {
+		t.Fatalf("upgraded policy level = %v, want workspace_write", upgraded.Level)
+	}
+	if upgraded.Cwd == readOnly.Cwd {
+		t.Fatalf("different non-owner users must not share a sandbox directory")
+	}
+}
+
+func TestSanitizeUserIDForPathIsSafeAndStable(t *testing.T) {
+	id := "o9cq80ykt-8P0b7crARaJZtX1T9g@im.wechat"
+	got := sanitizeUserIDForPath(id)
+	for _, r := range got {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '-') {
+			t.Fatalf("sanitized path %q contains unsafe character %q", got, r)
+		}
+	}
+	if got2 := sanitizeUserIDForPath(id); got2 != got {
+		t.Fatalf("sanitizeUserIDForPath should be deterministic: %q vs %q", got, got2)
+	}
+	if other := sanitizeUserIDForPath("different-user@im.wechat"); other == got {
+		t.Fatalf("different user IDs should not collide: %q", got)
+	}
+}
+
+func TestDailyQuotaResetsOnNewDay(t *testing.T) {
+	h := newTestHandler()
+	userID := "reset-test@im.wechat"
+	h.SetUserPermission(userID, config.UserPermission{Level: config.PermissionReadOnly, DailyLimit: 1})
+
+	if !h.consumeQuota(userID) {
+		t.Fatal("first message today should be allowed")
+	}
+	if h.consumeQuota(userID) {
+		t.Fatal("second message today should be blocked by DailyLimit=1")
+	}
+
+	// Simulate the next day by backdating the recorded usage date.
+	h.usageMu.Lock()
+	h.usage[userID].date = "2000-01-01"
+	h.usageMu.Unlock()
+
+	if !h.consumeQuota(userID) {
+		t.Fatal("quota should reset once the local date changes")
 	}
 }

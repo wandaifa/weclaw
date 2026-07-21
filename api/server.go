@@ -15,10 +15,12 @@ import (
 )
 
 const (
-	AccountReloadPath = "/api/internal/accounts/reload"
-	AccountsPath      = "/api/internal/accounts"
-	AccountStatePath  = "/api/internal/accounts/state"
-	MessageMergePath  = "/api/internal/settings/message-merge"
+	AccountReloadPath    = "/api/internal/accounts/reload"
+	AccountsPath         = "/api/internal/accounts"
+	AccountStatePath     = "/api/internal/accounts/state"
+	MessageMergePath     = "/api/internal/settings/message-merge"
+	PermissionsPath      = "/api/internal/permissions"
+	PermissionsUsagePath = "/api/internal/permissions/usage"
 )
 
 // AccountReloadResult describes the accounts active after a reload.
@@ -55,16 +57,54 @@ type MessageMergeSettings struct {
 type MessageMergeProvider func() MessageMergeSettings
 type MessageMergeController func(context.Context, MessageMergeSettings) (MessageMergeSettings, error)
 
+// UserPermissionInfo describes one WeChat user's configured sandbox tier for
+// the internal permissions API. Owners are listed read-only (IsOwner=true)
+// and cannot be changed through this API.
+type UserPermissionInfo struct {
+	UserID     string `json:"user_id"`
+	Level      string `json:"level"` // "read_only" | "workspace_write"
+	DailyLimit int    `json:"daily_limit"`
+	IsOwner    bool   `json:"is_owner"`
+}
+
+// PermissionsProvider lists every non-owner user seen so far with their
+// current tier (defaulted to read_only if never configured).
+type PermissionsProvider func() []UserPermissionInfo
+
+// PermissionSetRequest is the JSON body for POST /api/internal/permissions.
+type PermissionSetRequest struct {
+	UserID     string `json:"user_id"`
+	Level      string `json:"level"`
+	DailyLimit int    `json:"daily_limit,omitempty"`
+}
+
+// PermissionController persists and immediately applies one user's tier.
+type PermissionController func(context.Context, PermissionSetRequest) (UserPermissionInfo, error)
+
+// UsageInfo is one non-owner user's message count for the current local day.
+type UsageInfo struct {
+	UserID string `json:"user_id"`
+	Date   string `json:"date"`
+	Count  int    `json:"count"`
+	Limit  int    `json:"limit"`
+}
+
+// UsageProvider returns today's quota usage snapshot for the internal API.
+type UsageProvider func() []UsageInfo
+
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	mu       sync.RWMutex
-	clients  []*ilink.Client
-	reloader AccountReloader
-	status   AccountStatusProvider
-	state    AccountStateController
-	merge    MessageMergeProvider
-	setMerge MessageMergeController
-	addr     string
+	mu            sync.RWMutex
+	clients       []*ilink.Client
+	reloader      AccountReloader
+	status        AccountStatusProvider
+	state         AccountStateController
+	merge         MessageMergeProvider
+	setMerge      MessageMergeController
+	permissions   PermissionsProvider
+	setPermission PermissionController
+	usage         UsageProvider
+	addr          string
 }
 
 // NewServer creates an API server.
@@ -108,6 +148,27 @@ func (s *Server) SetMessageMergeController(controller MessageMergeController) {
 	s.setMerge = controller
 }
 
+// SetPermissionsProvider exposes per-user sandbox tiers through the loopback-only permissions endpoint.
+func (s *Server) SetPermissionsProvider(provider PermissionsProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.permissions = provider
+}
+
+// SetPermissionController enables setting one user's sandbox tier through the loopback API.
+func (s *Server) SetPermissionController(controller PermissionController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setPermission = controller
+}
+
+// SetUsageProvider exposes today's quota usage through the loopback-only usage endpoint.
+func (s *Server) SetUsageProvider(provider UsageProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.usage = provider
+}
+
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
 	BotID    string `json:"bot_id,omitempty"`
@@ -125,6 +186,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(AccountsPath, s.handleAccounts)
 	mux.HandleFunc(AccountStatePath, s.handleAccountState)
 	mux.HandleFunc(MessageMergePath, s.handleMessageMerge)
+	mux.HandleFunc(PermissionsPath, s.handlePermissions)
+	mux.HandleFunc(PermissionsUsagePath, s.handlePermissionsUsage)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -353,6 +416,66 @@ func (s *Server) handleMessageMerge(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handlePermissions(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider, controller := s.permissions, s.setPermission
+	s.mu.RUnlock()
+
+	if r.Method == http.MethodGet {
+		if provider == nil {
+			http.Error(w, "permissions are unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string][]UserPermissionInfo{"users": provider()})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if controller == nil {
+		http.Error(w, "permissions are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req PermissionSetRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
+		return
+	}
+	updated, err := controller(r.Context(), req)
+	if err != nil {
+		http.Error(w, "invalid permission update: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handlePermissionsUsage(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider := s.usage
+	s.mu.RUnlock()
+	if provider == nil {
+		http.Error(w, "usage is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string][]UsageInfo{"usage": provider()})
 }
 
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {

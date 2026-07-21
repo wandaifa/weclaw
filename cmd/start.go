@@ -127,6 +127,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid message merge settings: %w", err)
 	}
 	handler.SetUserAgents(cfg.UserAgents)
+	handler.SetUserPermissions(cfg.UserPermissions)
 
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
@@ -220,6 +221,50 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return api.MessageMergeSettings{}, err
 		}
 		return apiMessageMergeSettings(handler.MergeSettings()), nil
+	})
+	apiServer.SetPermissionsProvider(func() []api.UserPermissionInfo {
+		infos := make([]api.UserPermissionInfo, 0)
+		for _, ownerID := range config.OwnerUserIDs() {
+			infos = append(infos, api.UserPermissionInfo{UserID: ownerID, Level: "full_access", IsOwner: true})
+		}
+		for _, perm := range handler.PermissionsSnapshot() {
+			infos = append(infos, api.UserPermissionInfo{
+				UserID: perm.UserID, Level: string(perm.Level), DailyLimit: perm.DailyLimit,
+			})
+		}
+		return infos
+	})
+	apiServer.SetPermissionController(func(_ context.Context, req api.PermissionSetRequest) (api.UserPermissionInfo, error) {
+		if config.IsOwner(req.UserID) {
+			return api.UserPermissionInfo{}, fmt.Errorf("cannot set permission for the owner")
+		}
+		level, err := config.ParsePermissionLevel(req.Level)
+		if err != nil {
+			return api.UserPermissionInfo{}, err
+		}
+		perm := config.UserPermission{Level: level, DailyLimit: req.DailyLimit}
+
+		configMu.Lock()
+		if cfg.UserPermissions == nil {
+			cfg.UserPermissions = make(map[string]config.UserPermission)
+		}
+		cfg.UserPermissions[req.UserID] = perm
+		saveErr := config.Save(cfg)
+		configMu.Unlock()
+		if saveErr != nil {
+			return api.UserPermissionInfo{}, saveErr
+		}
+
+		handler.SetUserPermission(req.UserID, perm)
+		return api.UserPermissionInfo{UserID: req.UserID, Level: string(level), DailyLimit: req.DailyLimit}, nil
+	})
+	apiServer.SetUsageProvider(func() []api.UsageInfo {
+		entries := handler.UsageSnapshot()
+		usage := make([]api.UsageInfo, 0, len(entries))
+		for _, e := range entries {
+			usage = append(usage, api.UsageInfo{UserID: e.UserID, Date: e.Date, Count: e.Count, Limit: e.Limit})
+		}
+		return usage
 	})
 	apiServer.SetAccountStatusProvider(func() []api.AccountStatus {
 		saved, err := ilink.LoadAccounts()

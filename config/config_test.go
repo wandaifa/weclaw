@@ -138,3 +138,58 @@ func TestLoadEnvOverridesTopLevelOnly(t *testing.T) {
 		t.Fatalf("agent env = %q, want preserved value", got)
 	}
 }
+
+func TestUserPermissionsRoundTrip(t *testing.T) {
+	cfg := Config{
+		UserPermissions: map[string]UserPermission{
+			"someone@im.wechat": {Level: PermissionWorkspaceWrite, DailyLimit: 20},
+		},
+	}
+	data, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	perm, ok := out.UserPermissions["someone@im.wechat"]
+	if !ok {
+		t.Fatal("expected someone@im.wechat to round-trip")
+	}
+	if perm.Level != PermissionWorkspaceWrite || perm.DailyLimit != 20 {
+		t.Fatalf("perm = %+v, want workspace_write/20", perm)
+	}
+}
+
+func TestParsePermissionLevel(t *testing.T) {
+	if _, err := ParsePermissionLevel("read_only"); err != nil {
+		t.Fatalf("read_only should be valid: %v", err)
+	}
+	if _, err := ParsePermissionLevel("workspace_write"); err != nil {
+		t.Fatalf("workspace_write should be valid: %v", err)
+	}
+	if _, err := ParsePermissionLevel("full_access"); err == nil {
+		t.Fatal("full_access should be rejected — it is reserved for the hardcoded owner, not settable via config")
+	}
+	if _, err := ParsePermissionLevel("nonsense"); err == nil {
+		t.Fatal("unknown level should be rejected")
+	}
+}
+
+func TestIsOwner(t *testing.T) {
+	for _, id := range OwnerUserIDs() {
+		if !IsOwner(id) {
+			t.Fatalf("IsOwner(%q) = false, want true", id)
+		}
+	}
+	if IsOwner("random-stranger@im.wechat") {
+		t.Fatal("IsOwner should reject arbitrary IDs")
+	}
+	if IsOwner("") {
+		t.Fatal("IsOwner should reject empty string")
+	}
+	if len(OwnerUserIDs()) != 2 {
+		t.Fatalf("OwnerUserIDs() len = %d, want 2", len(OwnerUserIDs()))
+	}
+}

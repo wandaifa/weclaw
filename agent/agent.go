@@ -94,6 +94,38 @@ type Agent interface {
 	SetCwd(cwd string)
 }
 
+// SandboxLevel is how much filesystem/exec access a conversation gets.
+type SandboxLevel string
+
+const (
+	// SandboxReadOnly allows chatting and reading but no writes or command execution.
+	SandboxReadOnly SandboxLevel = "read_only"
+	// SandboxWorkspaceWrite allows reads/writes confined to ConversationPolicy.WritableRoots.
+	SandboxWorkspaceWrite SandboxLevel = "workspace_write"
+	// SandboxFullAccess is today's unrestricted behavior, reserved for the owner.
+	SandboxFullAccess SandboxLevel = "full_access"
+)
+
+// ConversationPolicy is the sandbox tier applied to one conversationID.
+type ConversationPolicy struct {
+	Level SandboxLevel
+	// Cwd overrides the agent's working directory for this conversation.
+	// Empty means "use the agent's global cwd" (owner behavior, respects /cwd).
+	Cwd string
+	// WritableRoots lists directories writable under SandboxWorkspaceWrite.
+	WritableRoots []string
+}
+
+// PolicyAwareAgent is implemented by agents that can apply a different sandbox
+// per conversation on top of a single shared process (currently only the
+// codex app-server ACP backend). Callers should type-assert for it rather
+// than adding it to the base Agent interface, since CLI/HTTP agents have no
+// equivalent concept.
+type PolicyAwareAgent interface {
+	Agent
+	SetConversationPolicy(conversationID string, policy ConversationPolicy)
+}
+
 // ImageInput holds image data for multimodal chat.
 type ImageInput struct {
 	MimeType string

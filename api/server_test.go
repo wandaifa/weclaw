@@ -152,3 +152,74 @@ func TestHandleMessageMergeReadsAndUpdatesSettings(t *testing.T) {
 		t.Fatalf("POST = %d settings=%+v", postResp.Code, current)
 	}
 }
+
+func TestHandlePermissionsReadsAndUpdates(t *testing.T) {
+	stored := map[string]UserPermissionInfo{
+		"owner@im.wechat": {UserID: "owner@im.wechat", Level: "full_access", IsOwner: true},
+	}
+	server := NewServer(nil, "")
+	server.SetPermissionsProvider(func() []UserPermissionInfo {
+		out := make([]UserPermissionInfo, 0, len(stored))
+		for _, v := range stored {
+			out = append(out, v)
+		}
+		return out
+	})
+	server.SetPermissionController(func(_ context.Context, req PermissionSetRequest) (UserPermissionInfo, error) {
+		info := UserPermissionInfo{UserID: req.UserID, Level: req.Level, DailyLimit: req.DailyLimit}
+		stored[req.UserID] = info
+		return info, nil
+	})
+
+	get := httptest.NewRequest(http.MethodGet, PermissionsPath, nil)
+	get.RemoteAddr = "127.0.0.1:12345"
+	getResp := httptest.NewRecorder()
+	server.handlePermissions(getResp, get)
+	if getResp.Code != http.StatusOK || !strings.Contains(getResp.Body.String(), "full_access") {
+		t.Fatalf("GET = %d %s", getResp.Code, getResp.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, PermissionsPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","level":"workspace_write","daily_limit":30}`))
+	post.RemoteAddr = "127.0.0.1:12345"
+	postResp := httptest.NewRecorder()
+	server.handlePermissions(postResp, post)
+	if postResp.Code != http.StatusOK {
+		t.Fatalf("POST = %d %s", postResp.Code, postResp.Body.String())
+	}
+	if got := stored["someone@im.wechat"]; got.Level != "workspace_write" || got.DailyLimit != 30 {
+		t.Fatalf("stored permission = %+v", got)
+	}
+}
+
+func TestHandlePermissionsRejectsNonLoopback(t *testing.T) {
+	called := false
+	server := NewServer(nil, "")
+	server.SetPermissionsProvider(func() []UserPermissionInfo {
+		called = true
+		return nil
+	})
+	req := httptest.NewRequest(http.MethodGet, PermissionsPath, nil)
+	req.RemoteAddr = "192.0.2.1:12345"
+	resp := httptest.NewRecorder()
+	server.handlePermissions(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.Code)
+	}
+	if called {
+		t.Fatal("provider should not be called for a non-loopback request")
+	}
+}
+
+func TestHandlePermissionsUsageReturnsSnapshot(t *testing.T) {
+	server := NewServer(nil, "")
+	server.SetUsageProvider(func() []UsageInfo {
+		return []UsageInfo{{UserID: "someone@im.wechat", Date: "2026-07-21", Count: 3, Limit: 50}}
+	})
+	req := httptest.NewRequest(http.MethodGet, PermissionsUsagePath, nil)
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handlePermissionsUsage(resp, req)
+	if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), `"count":3`) {
+		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
+	}
+}

@@ -34,8 +34,9 @@ type ACPAgent struct {
 	scanner  *bufio.Scanner
 	started  bool
 	nextID   atomic.Int64
-	sessions map[string]string // conversationID -> sessionID (legacy ACP)
-	threads  map[string]string // conversationID -> threadID (codex app-server)
+	sessions map[string]string             // conversationID -> sessionID (legacy ACP)
+	threads  map[string]string             // conversationID -> threadID (codex app-server)
+	policies map[string]ConversationPolicy // conversationID -> sandbox tier
 
 	// pending tracks in-flight JSON-RPC requests
 	pendingMu sync.Mutex
@@ -212,6 +213,7 @@ func NewACPAgent(cfg ACPAgentConfig) *ACPAgent {
 		protocol:     protocol,
 		sessions:     make(map[string]string),
 		threads:      make(map[string]string),
+		policies:     make(map[string]ConversationPolicy),
 		pending:      make(map[int64]chan *rpcResponse),
 		notifyCh:     make(map[string]chan *sessionUpdate),
 		turnCh:       make(map[string]chan *codexTurnEvent),
@@ -335,6 +337,64 @@ func (a *ACPAgent) SetCwd(cwd string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.cwd = cwd
+}
+
+// SetConversationPolicy records the sandbox tier for one conversationID.
+// codex ties sandbox/cwd to a thread at creation time, so a policy change
+// invalidates the cached thread/session for that conversation to force a
+// rebuild with the new settings on the next turn.
+func (a *ACPAgent) SetConversationPolicy(conversationID string, policy ConversationPolicy) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if old, ok := a.policies[conversationID]; ok && policiesEqual(old, policy) {
+		return
+	}
+	a.policies[conversationID] = policy
+	delete(a.threads, conversationID)
+	delete(a.sessions, conversationID)
+}
+
+// effectivePolicy returns the policy for conversationID, defaulting to the
+// most restrictive tier (fail-closed) if none was ever set. Callers must
+// hold a.mu.
+func (a *ACPAgent) effectivePolicyLocked(conversationID string) ConversationPolicy {
+	if p, ok := a.policies[conversationID]; ok {
+		return p
+	}
+	return ConversationPolicy{Level: SandboxReadOnly, Cwd: a.cwd}
+}
+
+func policiesEqual(a, b ConversationPolicy) bool {
+	if a.Level != b.Level || a.Cwd != b.Cwd || len(a.WritableRoots) != len(b.WritableRoots) {
+		return false
+	}
+	for i := range a.WritableRoots {
+		if a.WritableRoots[i] != b.WritableRoots[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// codexSandboxParams maps a ConversationPolicy to codex app-server's
+// thread/start "sandbox" (string enum) and turn/start "sandboxPolicy"
+// (object) shapes, plus the cwd to use.
+func codexSandboxParams(policy ConversationPolicy, agentCwd string) (sandboxMode string, sandboxPolicy map[string]interface{}, cwd string) {
+	cwd = policy.Cwd
+	if cwd == "" {
+		cwd = agentCwd
+	}
+	switch policy.Level {
+	case SandboxFullAccess:
+		return "danger-full-access", map[string]interface{}{"type": "dangerFullAccess"}, cwd
+	case SandboxWorkspaceWrite:
+		return "workspace-write", map[string]interface{}{
+			"type":          "workspaceWrite",
+			"writableRoots": policy.WritableRoots,
+		}, cwd
+	default:
+		return "read-only", map[string]interface{}{"type": "readOnly"}, cwd
+	}
 }
 
 // ResetSession clears the existing session for the given conversationID and
@@ -600,8 +660,17 @@ func (a *ACPAgent) getOrCreateSession(ctx context.Context, conversationID string
 		return sid, false, nil
 	}
 
+	a.mu.Lock()
+	policy := a.effectivePolicyLocked(conversationID)
+	agentCwd := a.cwd
+	a.mu.Unlock()
+	cwd := policy.Cwd
+	if cwd == "" {
+		cwd = agentCwd
+	}
+
 	result, err := a.rpc(ctx, "session/new", newSessionParams{
-		Cwd:        a.cwd,
+		Cwd:        cwd,
 		McpServers: []interface{}{},
 	})
 	if err != nil {
@@ -631,10 +700,16 @@ func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string)
 		return tid, false, nil
 	}
 
+	a.mu.Lock()
+	policy := a.effectivePolicyLocked(conversationID)
+	agentCwd := a.cwd
+	a.mu.Unlock()
+	sandboxMode, _, cwd := codexSandboxParams(policy, agentCwd)
+
 	params := map[string]interface{}{
 		"approvalPolicy": "never",
-		"cwd":            a.cwd,
-		"sandbox":        "danger-full-access",
+		"cwd":            cwd,
+		"sandbox":        sandboxMode,
 	}
 	if a.model != "" {
 		params["model"] = a.model
@@ -703,15 +778,21 @@ func (a *ACPAgent) chatCodexAppServerWithInput(ctx context.Context, conversation
 		a.notifyMu.Unlock()
 	}()
 
+	a.mu.Lock()
+	policy := a.effectivePolicyLocked(conversationID)
+	agentCwd := a.cwd
+	a.mu.Unlock()
+	_, sandboxPolicy, turnCwd := codexSandboxParams(policy, agentCwd)
+
 	// Start turn (call returns quickly with turn info, actual content comes via events)
 	go func() {
 		_, err := a.rpc(ctx, "turn/start", codexTurnStartParams{
 			ThreadID:       threadID,
 			ApprovalPolicy: "never",
 			Input:          input,
-			SandboxPolicy:  map[string]interface{}{"type": "dangerFullAccess"},
+			SandboxPolicy:  sandboxPolicy,
 			Model:          a.model,
-			Cwd:            a.cwd,
+			Cwd:            turnCwd,
 		})
 		if err != nil {
 			// If call itself fails, signal via turn channel

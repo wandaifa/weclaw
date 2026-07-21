@@ -10,12 +10,40 @@ import (
 
 // Config holds the application configuration.
 type Config struct {
-	DefaultAgent string                 `json:"default_agent"`
-	UserAgents   map[string]string      `json:"user_agents,omitempty"`
-	APIAddr      string                 `json:"api_addr,omitempty"`
-	SaveDir      string                 `json:"save_dir,omitempty"`
-	MessageMerge MessageMergeConfig     `json:"message_merge,omitempty"`
-	Agents       map[string]AgentConfig `json:"agents"`
+	DefaultAgent    string                    `json:"default_agent"`
+	UserAgents      map[string]string         `json:"user_agents,omitempty"`
+	UserPermissions map[string]UserPermission `json:"user_permissions,omitempty"`
+	APIAddr         string                    `json:"api_addr,omitempty"`
+	SaveDir         string                    `json:"save_dir,omitempty"`
+	MessageMerge    MessageMergeConfig        `json:"message_merge,omitempty"`
+	Agents          map[string]AgentConfig    `json:"agents"`
+}
+
+// PermissionLevel is a non-owner user's sandbox tier for the shared codex agent.
+type PermissionLevel string
+
+const (
+	PermissionReadOnly       PermissionLevel = "read_only"
+	PermissionWorkspaceWrite PermissionLevel = "workspace_write"
+)
+
+// DefaultDailyMessageLimit applies to non-owner users without a per-user override.
+const DefaultDailyMessageLimit = 50
+
+// UserPermission is one non-owner user's configured sandbox tier and daily quota.
+type UserPermission struct {
+	Level      PermissionLevel `json:"level"`
+	DailyLimit int             `json:"daily_limit,omitempty"` // 0 = use DefaultDailyMessageLimit
+}
+
+// ParsePermissionLevel validates a level string from the internal permissions API.
+func ParsePermissionLevel(s string) (PermissionLevel, error) {
+	switch PermissionLevel(s) {
+	case PermissionReadOnly, PermissionWorkspaceWrite:
+		return PermissionLevel(s), nil
+	default:
+		return "", fmt.Errorf("unknown permission level %q", s)
+	}
 }
 
 // MessageMergeConfig controls how consecutive ordinary text messages are combined.
@@ -100,8 +128,9 @@ func BuildAliasMap(agents map[string]AgentConfig) map[string]string {
 // DefaultConfig returns an empty configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		UserAgents: make(map[string]string),
-		Agents:     make(map[string]AgentConfig),
+		UserAgents:      make(map[string]string),
+		UserPermissions: make(map[string]UserPermission),
+		Agents:          make(map[string]AgentConfig),
 	}
 }
 
@@ -140,6 +169,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.UserAgents == nil {
 		cfg.UserAgents = make(map[string]string)
+	}
+	if cfg.UserPermissions == nil {
+		cfg.UserPermissions = make(map[string]UserPermission)
 	}
 
 	loadEnv(cfg)
