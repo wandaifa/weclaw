@@ -635,6 +635,31 @@ func TestQuotaDoesNotLimitOwner(t *testing.T) {
 	}
 }
 
+func TestUsageSnapshotTracksOwnerAsUnlimited(t *testing.T) {
+	h := newTestHandler()
+	ownerID := config.OwnerUserIDs()[0]
+	for i := 0; i < 3; i++ {
+		h.consumeQuota(ownerID)
+	}
+
+	var entry *UsageEntry
+	for _, e := range h.UsageSnapshot() {
+		if e.UserID == ownerID {
+			e := e
+			entry = &e
+		}
+	}
+	if entry == nil {
+		t.Fatal("owner should appear in the usage snapshot once they've sent messages")
+	}
+	if entry.Count != 3 {
+		t.Fatalf("owner usage count = %d, want 3", entry.Count)
+	}
+	if entry.Limit != 0 {
+		t.Fatalf("owner limit = %d, want 0 (unlimited)", entry.Limit)
+	}
+}
+
 func TestConversationPolicyOwnerVsNonOwner(t *testing.T) {
 	h := newTestHandler()
 	ownerID := config.OwnerUserIDs()[0]

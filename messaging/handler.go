@@ -285,6 +285,9 @@ func (h *Handler) UsageSnapshot() []UsageEntry {
 	h.mu.RUnlock()
 
 	limitFor := func(userID string) int {
+		if config.IsOwner(userID) {
+			return 0 // unlimited
+		}
 		if perm, ok := perms[userID]; ok && perm.DailyLimit > 0 {
 			return perm.DailyLimit
 		}
@@ -1144,14 +1147,15 @@ func (h *Handler) dailyLimit(userID string) int {
 // incrementing its counter if so. Owners are never limited. The counter is
 // in-memory only and resets whenever the local date changes.
 func (h *Handler) consumeQuota(userID string) bool {
-	if config.IsOwner(userID) {
-		return true
-	}
+	owner := config.IsOwner(userID)
 	today := time.Now().Format("2006-01-02")
 
-	h.mu.RLock()
-	limit := h.dailyLimit(userID)
-	h.mu.RUnlock()
+	var limit int
+	if !owner {
+		h.mu.RLock()
+		limit = h.dailyLimit(userID)
+		h.mu.RUnlock()
+	}
 
 	h.usageMu.Lock()
 	defer h.usageMu.Unlock()
@@ -1160,7 +1164,9 @@ func (h *Handler) consumeQuota(userID string) bool {
 		u = &dailyUsage{date: today}
 		h.usage[userID] = u
 	}
-	if u.count >= limit {
+	// Owners are still counted (for the permissions page's "today's usage"
+	// display) but never blocked, regardless of count.
+	if !owner && u.count >= limit {
 		return false
 	}
 	u.count++
