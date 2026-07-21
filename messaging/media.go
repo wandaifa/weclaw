@@ -123,7 +123,19 @@ func sendMediaData(ctx context.Context, client *ilink.Client, toUserID, fileName
 	}
 
 	log.Printf("[media] bot=%s sent %s to %s from %s", client.BotID(), contentType, toUserID, source)
+	persistOutboundMedia(client.BotID(), toUserID, mediaKindName(itemType), source)
 	return nil
+}
+
+func mediaKindName(itemType int) string {
+	switch itemType {
+	case ilink.ItemTypeImage:
+		return "image"
+	case ilink.ItemTypeVideo:
+		return "video"
+	default:
+		return "file"
+	}
 }
 
 func downloadFile(ctx context.Context, url string) ([]byte, string, error) {

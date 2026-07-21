@@ -18,6 +18,7 @@ import (
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/fastclaw-ai/weclaw/store"
 	"github.com/mdp/qrterminal/v3"
 	"github.com/spf13/cobra"
 )
@@ -105,6 +106,19 @@ func runStart(cmd *cobra.Command, args []string) error {
 			names = append(names, name)
 		}
 		log.Printf("Available agents: %v (default: %s)", names, cfg.DefaultAgent)
+	}
+
+	// Open message persistence. Best-effort: a failure here logs and
+	// continues without it rather than blocking the whole bridge from starting.
+	dbPath, err := store.DefaultPath()
+	if err != nil {
+		log.Printf("Warning: could not resolve message store path: %v", err)
+	} else if msgStore, err := store.Open(dbPath); err != nil {
+		log.Printf("Warning: failed to open message store at %s: %v", dbPath, err)
+	} else {
+		messaging.SetMessageStore(msgStore)
+		defer msgStore.Close()
+		log.Printf("Message store ready: %s", dbPath)
 	}
 
 	// Create handler with an agent factory for on-demand agent creation

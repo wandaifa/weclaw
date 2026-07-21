@@ -488,6 +488,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 	}
 	if text != "" {
 		log.Printf("[handler] bot=%s received from %s: %q", botID, msg.FromUserID, truncate(text, 80))
+		persistInboundText(botID, msg, text)
 	}
 	key := chatKey(client, msg.FromUserID)
 	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text)})
@@ -821,9 +822,10 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 
 	text = h.withPendingMediaContext(msg.FromUserID, text)
 	var reply string
+	var elapsed time.Duration
 	if ag != nil {
 		var err error
-		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, text)
+		reply, elapsed, err = h.chatWithAgent(ctx, ag, msg.FromUserID, text)
 		if err != nil {
 			reply = agentFailureReply(agentName, err)
 		}
@@ -832,7 +834,7 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 		reply = agentRecoveringReply()
 	}
 
-	h.sendReplyWithMedia(ctx, client, msg, agentName, reply, clientID)
+	h.sendReplyWithMedia(ctx, client, msg, agentName, reply, clientID, elapsed)
 }
 
 func agentRecoveringReply() string {
@@ -956,11 +958,11 @@ func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, ms
 		return
 	}
 
-	reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+	reply, elapsed, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
 	if err != nil {
 		reply = agentFailureReply(name, err)
 	}
-	h.sendReplyWithMedia(ctx, client, msg, name, reply, clientID)
+	h.sendReplyWithMedia(ctx, client, msg, name, reply, clientID, elapsed)
 }
 
 // broadcastToAgents sends the message to multiple agents in parallel.
@@ -976,8 +978,9 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 
 	message = h.withPendingMediaContext(msg.FromUserID, message)
 	type result struct {
-		name  string
-		reply string
+		name    string
+		reply   string
+		elapsed time.Duration
 	}
 
 	ch := make(chan result, len(names))
@@ -989,12 +992,12 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 				ch <- result{name: n, reply: agentFailureReply(n, err)}
 				return
 			}
-			reply, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+			reply, elapsed, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
 			if err != nil {
 				ch <- result{name: n, reply: agentFailureReply(n, err)}
 				return
 			}
-			ch <- result{name: n, reply: reply}
+			ch <- result{name: n, reply: reply, elapsed: elapsed}
 		}(name)
 	}
 
@@ -1003,12 +1006,12 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 		r := <-ch
 		reply := fmt.Sprintf("[%s] %s", r.name, r.reply)
 		clientID := NewClientID()
-		h.sendReplyWithMedia(ctx, client, msg, r.name, reply, clientID)
+		h.sendReplyWithMedia(ctx, client, msg, r.name, reply, clientID, r.elapsed)
 	}
 }
 
 // sendReplyWithMedia sends a text reply and any extracted image URLs.
-func (h *Handler) sendReplyWithMedia(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, agentName, reply, clientID string) {
+func (h *Handler) sendReplyWithMedia(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, agentName, reply, clientID string, elapsed time.Duration) {
 	imageURLs := ExtractImageURLs(reply)
 	attachmentPaths := extractLocalAttachmentPaths(reply)
 	allowedRoots := h.allowedAttachmentRoots(agentName)
@@ -1031,7 +1034,7 @@ func (h *Handler) sendReplyWithMedia(ctx context.Context, client *ilink.Client, 
 
 	reply = rewriteReplyWithAttachmentResults(reply, sentPaths, failedPaths)
 
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID, ReplyMeta{Agent: agentName, ElapsedMS: elapsed.Milliseconds()}); err != nil {
 		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 	}
 
@@ -1060,7 +1063,7 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 }
 
 // chatWithAgent sends a message to an agent and returns the reply, with logging.
-func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string) (string, error) {
+func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string) (string, time.Duration, error) {
 	if pa, ok := ag.(agent.PolicyAwareAgent); ok {
 		pa.SetConversationPolicy(userID, h.conversationPolicy(userID))
 	}
@@ -1074,11 +1077,11 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 
 	if err != nil {
 		log.Printf("[handler] agent error (%s, elapsed=%s): %v", info, elapsed, err)
-		return "", err
+		return "", elapsed, err
 	}
 
 	log.Printf("[handler] agent replied (%s, elapsed=%s): %q", info, elapsed, truncate(reply, 100))
-	return reply, nil
+	return reply, elapsed, nil
 }
 
 // conversationPolicy resolves the sandbox tier for one WeChat user. Owners get
@@ -1521,8 +1524,10 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 	mimeType := detectImageMime(data)
 	log.Printf("[handler] bot=%s downloaded image from %s (%d bytes, %s)", botID, msg.FromUserID, len(data), mimeType)
 
-	if _, err := saveInboundImage(defaultInboundImageDir(), msg.FromUserID, data); err != nil {
+	if savedPath, err := saveInboundImage(defaultInboundImageDir(), msg.FromUserID, data); err != nil {
 		log.Printf("[handler] bot=%s failed to save inbound image from %s: %v", botID, msg.FromUserID, err)
+	} else {
+		persistInboundMedia(botID, msg, "image", filepath.Base(savedPath), savedPath, int64(len(data)))
 	}
 
 	if h.saveDir != "" {
@@ -1561,6 +1566,7 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 	}
 
 	var reply string
+	var elapsed time.Duration
 	if imgAgent, ok := ag.(agent.ImageChatAgent); ok {
 		log.Printf("[handler] bot=%s sending image to agent via ChatWithImage for %s", botID, msg.FromUserID)
 		reply, err = imgAgent.ChatWithImage(ctx, msg.FromUserID, "请识别并描述这张图片的内容。", &agent.ImageInput{
@@ -1568,13 +1574,13 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 			Data:     data,
 		})
 	} else {
-		reply, err = h.chatWithAgent(ctx, ag, msg.FromUserID, "[用户发送了一张图片，但当前 agent 不支持图片处理]")
+		reply, elapsed, err = h.chatWithAgent(ctx, ag, msg.FromUserID, "[用户发送了一张图片，但当前 agent 不支持图片处理]")
 	}
 	if err != nil {
 		reply = agentFailureReply(agentName, err)
 	}
 
-	h.sendReplyWithMedia(ctx, client, msg, agentName, reply, clientID)
+	h.sendReplyWithMedia(ctx, client, msg, agentName, reply, clientID, elapsed)
 }
 
 func (h *Handler) handleStoredMediaMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage, kind, fileName string, media *ilink.MediaInfo) {
@@ -1597,6 +1603,7 @@ func (h *Handler) handleStoredMediaMessage(ctx context.Context, client *ilink.Cl
 		log.Printf("[handler] bot=%s failed to save inbound %s from %s: %v", botID, kind, msg.FromUserID, err)
 		return
 	}
+	persistInboundMedia(botID, msg, kind, safeInboundMediaName(fileName, kind, contentType), path, int64(len(data)))
 
 	h.contextTokens.Store(msg.FromUserID, msg.ContextToken)
 	h.addPendingMedia(msg.FromUserID, pendingMedia{Kind: kind, Name: safeInboundMediaName(fileName, kind, contentType), Path: path})

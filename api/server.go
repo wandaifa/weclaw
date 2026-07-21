@@ -266,7 +266,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	// Send text if provided
 	if req.Text != "" {
-		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, "", ""); err != nil {
+		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, "", "", messaging.ReplyMeta{Agent: "push"}); err != nil {
 			log.Printf("[api] send text failed: %v", err)
 			http.Error(w, "send text failed: "+err.Error(), http.StatusInternalServerError)
 			return

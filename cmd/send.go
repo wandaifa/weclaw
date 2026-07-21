@@ -3,11 +3,13 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"log"
 	"os/signal"
 	"syscall"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/fastclaw-ai/weclaw/store"
 	"github.com/spf13/cobra"
 )
 
@@ -58,8 +60,17 @@ var sendCmd = &cobra.Command{
 			return err
 		}
 
+		if dbPath, err := store.DefaultPath(); err != nil {
+			log.Printf("Warning: could not resolve message store path: %v", err)
+		} else if msgStore, err := store.Open(dbPath); err != nil {
+			log.Printf("Warning: failed to open message store at %s: %v", dbPath, err)
+		} else {
+			messaging.SetMessageStore(msgStore)
+			defer msgStore.Close()
+		}
+
 		if sendText != "" {
-			if err := messaging.SendTextReply(ctx, client, sendTo, sendText, "", ""); err != nil {
+			if err := messaging.SendTextReply(ctx, client, sendTo, sendText, "", "", messaging.ReplyMeta{Agent: "push"}); err != nil {
 				return fmt.Errorf("send text failed: %w", err)
 			}
 			fmt.Println("Text sent")

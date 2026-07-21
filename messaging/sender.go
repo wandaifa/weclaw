@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/fastclaw-ai/weclaw/store"
 	"github.com/google/uuid"
 )
 
@@ -35,11 +36,25 @@ func SendTypingState(ctx context.Context, client *ilink.Client, userID, contextT
 	return nil
 }
 
+// ReplyMeta carries optional persistence context for a reply: which agent
+// produced it and how long that took. Zero value means "not an agent reply"
+// (a system/utility reply like a busy or quota notice) unless the "push"
+// sentinel is used for CLI/API-initiated sends.
+type ReplyMeta struct {
+	Agent     string
+	ElapsedMS int64
+}
+
 // SendTextReply sends a text reply to a user through the iLink API.
-// If clientID is empty, a new one is generated.
-func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, contextToken, clientID string) error {
+// If clientID is empty, a new one is generated. meta is optional and only
+// affects what gets persisted, never the send itself.
+func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, contextToken, clientID string, meta ...ReplyMeta) error {
 	if clientID == "" {
 		clientID = NewClientID()
+	}
+	var m ReplyMeta
+	if len(meta) > 0 {
+		m = meta[0]
 	}
 
 	// Convert markdown to plain text for WeChat display
@@ -75,6 +90,14 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 	}
 
 	log.Printf("[sender] bot=%s sent reply to %s: %q", client.BotID(), toUserID, truncate(text, 50))
+	persistMessage(store.MessageRecord{
+		Role:      "bot",
+		Agent:     m.Agent,
+		ElapsedMS: m.ElapsedMS,
+		BotID:     client.BotID(),
+		UserID:    toUserID,
+		Text:      text,
+	})
 	return nil
 }
 
