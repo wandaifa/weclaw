@@ -21,3 +21,6 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Local git worktrees (superpowers using-git-worktrees fallback)
+.worktrees/
