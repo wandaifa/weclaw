@@ -263,3 +263,131 @@ func loadAccountsWithCredentialsAt(dir string) ([]accountWithCredentials, error)
 func CredentialsPath() (string, error) {
 	return AccountsDir()
 }
+
+// DeletedAccount records that an account's credentials were permanently
+// removed. It never stores the bot token — this is a one-way tombstone
+// for display purposes, not a restore point.
+type DeletedAccount struct {
+	BotID       string `json:"bot_id"`
+	ILinkUserID string `json:"ilink_user_id"`
+	RemovedAt   string `json:"removed_at"`
+}
+
+// RemoveAccount permanently deletes a Bot's saved credentials. The account
+// must already be disabled (see SetAccountDisabled) or this returns an
+// error without touching any file. A token-free tombstone recording the
+// bot_id, scanning user, and removal time is written before the credential
+// file is deleted, so removal can be shown in a "deleted accounts" list —
+// but the credential itself is gone for good; there is no restore path.
+func RemoveAccount(botID string) error {
+	dir, err := AccountsDir()
+	if err != nil {
+		return err
+	}
+	return removeAccountAt(dir, botID)
+}
+
+func removeAccountAt(dir, botID string) error {
+	if botID == "" {
+		return fmt.Errorf("bot ID is required")
+	}
+
+	// Find the credential file for this bot ID (scan all .json files)
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read accounts dir: %w", err)
+	}
+
+	var credPath string
+	var creds Credentials
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var c Credentials
+		if json.Unmarshal(data, &c) == nil && c.ILinkBotID == botID {
+			credPath = filepath.Join(dir, e.Name())
+			creds = c
+			break
+		}
+	}
+
+	if credPath == "" {
+		return fmt.Errorf("bot_id %q is not saved locally", botID)
+	}
+
+	// Check if account is disabled
+	id := NormalizeAccountID(botID)
+	disabledPath := filepath.Join(dir, id+".disabled")
+	if _, err := os.Stat(disabledPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("account must be disabled before it can be removed")
+		}
+		return fmt.Errorf("check disabled marker: %w", err)
+	}
+
+	// Write tombstone
+	deletedDir := filepath.Join(dir, "deleted")
+	if err := os.MkdirAll(deletedDir, 0o700); err != nil {
+		return fmt.Errorf("create deleted accounts dir: %w", err)
+	}
+	tombstone := DeletedAccount{
+		BotID:       creds.ILinkBotID,
+		ILinkUserID: creds.ILinkUserID,
+		RemovedAt:   time.Now().UTC().Format(time.RFC3339),
+	}
+	tombstoneData, err := json.MarshalIndent(tombstone, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal tombstone: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(deletedDir, id+".json"), tombstoneData, 0o600); err != nil {
+		return fmt.Errorf("write tombstone: %w", err)
+	}
+
+	// Delete credential file and disabled marker
+	if err := os.Remove(credPath); err != nil {
+		return fmt.Errorf("remove credentials: %w", err)
+	}
+	if err := os.Remove(disabledPath); err != nil {
+		return fmt.Errorf("remove disabled marker: %w", err)
+	}
+	return nil
+}
+
+// LoadDeletedAccounts returns every tombstone recorded by RemoveAccount.
+func LoadDeletedAccounts() ([]DeletedAccount, error) {
+	dir, err := AccountsDir()
+	if err != nil {
+		return nil, err
+	}
+	return loadDeletedAccountsAt(filepath.Join(dir, "deleted"))
+}
+
+func loadDeletedAccountsAt(dir string) ([]DeletedAccount, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read deleted accounts dir: %w", err)
+	}
+	var result []DeletedAccount
+	for _, e := range entries {
+		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			continue
+		}
+		var rec DeletedAccount
+		if json.Unmarshal(data, &rec) == nil && rec.BotID != "" {
+			result = append(result, rec)
+		}
+	}
+	return result, nil
+}
