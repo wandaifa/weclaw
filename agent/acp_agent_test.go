@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -8,6 +9,105 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestSelectPermissionOption(t *testing.T) {
+	options := []permissionOption{
+		{OptionID: "opt-allow-once", Kind: "allow_once"},
+		{OptionID: "opt-allow-always", Kind: "allow_always"},
+		{OptionID: "opt-reject-once", Kind: "reject_once"},
+		{OptionID: "opt-reject-always", Kind: "reject_always"},
+	}
+	if got := selectPermissionOption(options, true); got != "opt-allow-once" {
+		t.Errorf("allow -> %q, want opt-allow-once", got)
+	}
+	if got := selectPermissionOption(options, false); got != "opt-reject-once" {
+		t.Errorf("deny -> %q, want opt-reject-once", got)
+	}
+
+	// No "_once" variant offered: fall back to any option of the right family.
+	onlyAlways := []permissionOption{
+		{OptionID: "a", Kind: "allow_always"},
+		{OptionID: "r", Kind: "reject_always"},
+	}
+	if got := selectPermissionOption(onlyAlways, true); got != "a" {
+		t.Errorf("allow fallback -> %q, want a", got)
+	}
+	if got := selectPermissionOption(onlyAlways, false); got != "r" {
+		t.Errorf("deny fallback -> %q, want r", got)
+	}
+
+	// Nothing matches the requested family: fall back to the first option so we always answer.
+	if got := selectPermissionOption(onlyAlways, false); got != "r" {
+		t.Errorf("deny with only allow options should still return something, got %q", got)
+	}
+	if got := selectPermissionOption(nil, true); got != "" {
+		t.Errorf("no options -> %q, want empty", got)
+	}
+}
+
+type fakeWriteCloser struct{ bytes.Buffer }
+
+func (f *fakeWriteCloser) Close() error { return nil }
+
+func TestHandlePermissionRequestDecidesByPolicy(t *testing.T) {
+	rawRequest := func(sessionID string) string {
+		req := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"method":  "session/request_permission",
+			"params": map[string]interface{}{
+				"sessionId": sessionID,
+				"options": []map[string]string{
+					{"optionId": "opt-allow-once", "kind": "allow_once"},
+					{"optionId": "opt-reject-once", "kind": "reject_once"},
+				},
+			},
+		}
+		data, _ := json.Marshal(req)
+		return string(data)
+	}
+
+	t.Run("owner is allowed", func(t *testing.T) {
+		a := NewACPAgent(ACPAgentConfig{})
+		out := &fakeWriteCloser{}
+		a.stdin = out
+		a.sessionOwners["sess-owner"] = "owner-conv"
+		a.policies["owner-conv"] = ConversationPolicy{Level: SandboxFullAccess}
+
+		a.handlePermissionRequest(rawRequest("sess-owner"))
+
+		if !strings.Contains(out.String(), `"optionId":"opt-allow-once"`) {
+			t.Fatalf("expected owner to be allowed, response: %s", out.String())
+		}
+	})
+
+	t.Run("non-owner is denied", func(t *testing.T) {
+		a := NewACPAgent(ACPAgentConfig{})
+		out := &fakeWriteCloser{}
+		a.stdin = out
+		a.sessionOwners["sess-other"] = "someone-else"
+		a.policies["someone-else"] = ConversationPolicy{Level: SandboxReadOnly}
+
+		a.handlePermissionRequest(rawRequest("sess-other"))
+
+		if !strings.Contains(out.String(), `"optionId":"opt-reject-once"`) {
+			t.Fatalf("expected non-owner to be denied, response: %s", out.String())
+		}
+	})
+
+	t.Run("unknown session fails closed (denied)", func(t *testing.T) {
+		a := NewACPAgent(ACPAgentConfig{})
+		out := &fakeWriteCloser{}
+		a.stdin = out
+		// No sessionOwners/policies entry at all for this session.
+
+		a.handlePermissionRequest(rawRequest("sess-unmapped"))
+
+		if !strings.Contains(out.String(), `"optionId":"opt-reject-once"`) {
+			t.Fatalf("expected unmapped session to fail closed (denied), response: %s", out.String())
+		}
+	})
+}
 
 func TestCodexSandboxParams(t *testing.T) {
 	cases := []struct {

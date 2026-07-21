@@ -28,15 +28,16 @@ type ACPAgent struct {
 	env          map[string]string
 	protocol     string // "legacy_acp" or "codex_app_server"
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	scanner  *bufio.Scanner
-	started  bool
-	nextID   atomic.Int64
-	sessions map[string]string             // conversationID -> sessionID (legacy ACP)
-	threads  map[string]string             // conversationID -> threadID (codex app-server)
-	policies map[string]ConversationPolicy // conversationID -> sandbox tier
+	mu            sync.Mutex
+	cmd           *exec.Cmd
+	stdin         io.WriteCloser
+	scanner       *bufio.Scanner
+	started       bool
+	nextID        atomic.Int64
+	sessions      map[string]string             // conversationID -> sessionID (legacy ACP)
+	sessionOwners map[string]string             // sessionID -> conversationID (legacy ACP), for policy lookups on permission requests
+	threads       map[string]string             // conversationID -> threadID (codex app-server)
+	policies      map[string]ConversationPolicy // conversationID -> sandbox tier
 
 	// pending tracks in-flight JSON-RPC requests
 	pendingMu sync.Mutex
@@ -141,8 +142,9 @@ type sessionUpdate struct {
 }
 
 type permissionRequestParams struct {
-	ToolCall json.RawMessage    `json:"toolCall"`
-	Options  []permissionOption `json:"options"`
+	SessionID string             `json:"sessionId"`
+	ToolCall  json.RawMessage    `json:"toolCall"`
+	Options   []permissionOption `json:"options"`
 }
 
 type permissionOption struct {
@@ -204,19 +206,20 @@ func NewACPAgent(cfg ACPAgentConfig) *ACPAgent {
 	}
 	protocol := detectACPProtocol(cfg.Command, cfg.Args)
 	return &ACPAgent{
-		command:      cfg.Command,
-		args:         cfg.Args,
-		model:        cfg.Model,
-		systemPrompt: cfg.SystemPrompt,
-		cwd:          cfg.Cwd,
-		env:          cfg.Env,
-		protocol:     protocol,
-		sessions:     make(map[string]string),
-		threads:      make(map[string]string),
-		policies:     make(map[string]ConversationPolicy),
-		pending:      make(map[int64]chan *rpcResponse),
-		notifyCh:     make(map[string]chan *sessionUpdate),
-		turnCh:       make(map[string]chan *codexTurnEvent),
+		command:       cfg.Command,
+		args:          cfg.Args,
+		model:         cfg.Model,
+		systemPrompt:  cfg.SystemPrompt,
+		cwd:           cfg.Cwd,
+		env:           cfg.Env,
+		protocol:      protocol,
+		sessions:      make(map[string]string),
+		sessionOwners: make(map[string]string),
+		threads:       make(map[string]string),
+		policies:      make(map[string]ConversationPolicy),
+		pending:       make(map[int64]chan *rpcResponse),
+		notifyCh:      make(map[string]chan *sessionUpdate),
+		turnCh:        make(map[string]chan *codexTurnEvent),
 	}
 }
 
@@ -351,6 +354,9 @@ func (a *ACPAgent) SetConversationPolicy(conversationID string, policy Conversat
 	}
 	a.policies[conversationID] = policy
 	delete(a.threads, conversationID)
+	if oldSessionID, ok := a.sessions[conversationID]; ok {
+		delete(a.sessionOwners, oldSessionID)
+	}
 	delete(a.sessions, conversationID)
 }
 
@@ -414,6 +420,9 @@ func (a *ACPAgent) ResetSession(ctx context.Context, conversationID string) (str
 	}
 
 	a.mu.Lock()
+	if oldSessionID, ok := a.sessions[conversationID]; ok {
+		delete(a.sessionOwners, oldSessionID)
+	}
 	delete(a.sessions, conversationID)
 	a.mu.Unlock()
 	log.Printf("[acp] session reset (conversation=%s), creating new session", conversationID)
@@ -684,6 +693,7 @@ func (a *ACPAgent) getOrCreateSession(ctx context.Context, conversationID string
 
 	a.mu.Lock()
 	a.sessions[conversationID] = sessionResult.SessionID
+	a.sessionOwners[sessionResult.SessionID] = conversationID
 	a.mu.Unlock()
 
 	return sessionResult.SessionID, true, nil
@@ -1191,8 +1201,12 @@ func (a *ACPAgent) dispatchToTurnCh(threadID string, evt *codexTurnEvent) {
 	}
 }
 
+// handlePermissionRequest answers a legacy-ACP "session/request_permission"
+// call (claude-agent-acp, cursor). Unlike codex app-server, this protocol has
+// no per-turn sandbox: the only enforcement available is deciding allow vs.
+// reject here, based on which conversation's policy owns the session. Owners
+// (full_access) are auto-allowed exactly as before; everyone else is denied.
 func (a *ACPAgent) handlePermissionRequest(raw string) {
-	// Parse the request to get the ID and auto-allow
 	var req struct {
 		ID     json.RawMessage         `json:"id"`
 		Params permissionRequestParams `json:"params"`
@@ -1202,13 +1216,16 @@ func (a *ACPAgent) handlePermissionRequest(raw string) {
 		return
 	}
 
-	// Find the "allow" option
-	optionID := "allow"
-	for _, opt := range req.Params.Options {
-		if opt.Kind == "allow" {
-			optionID = opt.OptionID
-			break
-		}
+	a.mu.Lock()
+	conversationID := a.sessionOwners[req.Params.SessionID]
+	policy := a.effectivePolicyLocked(conversationID)
+	a.mu.Unlock()
+	allow := policy.Level == SandboxFullAccess
+
+	optionID := selectPermissionOption(req.Params.Options, allow)
+	if optionID == "" {
+		log.Printf("[acp] permission request had no usable options (session=%s)", req.Params.SessionID)
+		return
 	}
 
 	// Send response
@@ -1233,7 +1250,40 @@ func (a *ACPAgent) handlePermissionRequest(raw string) {
 	fmt.Fprintf(a.stdin, "%s\n", data)
 	a.mu.Unlock()
 
-	log.Printf("[acp] auto-allowed permission request")
+	verdict := "denied"
+	if allow {
+		verdict = "allowed"
+	}
+	log.Printf("[acp] permission request %s (conversation=%s, session=%s)", verdict, conversationID, req.Params.SessionID)
+}
+
+// selectPermissionOption picks the option ID matching the desired decision.
+// ACP's PermissionOptionKind enum is allow_once/allow_always/reject_once/
+// reject_always; prefer the "_once" variant so we never silently grant a
+// standing "always allow" for the rest of the session. Falls back to any
+// option of the right family, then to the first option offered, so we always
+// answer rather than leave the agent's tool call hanging.
+func selectPermissionOption(options []permissionOption, allow bool) string {
+	wantOnce := "reject_once"
+	wantPrefix := "reject"
+	if allow {
+		wantOnce = "allow_once"
+		wantPrefix = "allow"
+	}
+	for _, opt := range options {
+		if opt.Kind == wantOnce {
+			return opt.OptionID
+		}
+	}
+	for _, opt := range options {
+		if strings.HasPrefix(opt.Kind, wantPrefix) {
+			return opt.OptionID
+		}
+	}
+	if len(options) > 0 {
+		return options[0].OptionID
+	}
+	return ""
 }
 
 // Info returns metadata about this agent.
