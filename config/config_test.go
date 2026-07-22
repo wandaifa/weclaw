@@ -142,7 +142,7 @@ func TestLoadEnvOverridesTopLevelOnly(t *testing.T) {
 func TestUserPermissionsRoundTrip(t *testing.T) {
 	cfg := Config{
 		UserPermissions: map[string]UserPermission{
-			"someone@im.wechat": {Level: PermissionWorkspaceWrite, DailyLimit: 20},
+			"someone@im.wechat": {Level: PermissionWorkspaceWrite, DailyLimit: 20, Blocked: true},
 		},
 	}
 	data, err := json.Marshal(&cfg)
@@ -157,8 +157,8 @@ func TestUserPermissionsRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("expected someone@im.wechat to round-trip")
 	}
-	if perm.Level != PermissionWorkspaceWrite || perm.DailyLimit != 20 {
-		t.Fatalf("perm = %+v, want workspace_write/20", perm)
+	if perm.Level != PermissionWorkspaceWrite || perm.DailyLimit != 20 || !perm.Blocked {
+		t.Fatalf("perm = %+v, want workspace_write/20/blocked", perm)
 	}
 }
 

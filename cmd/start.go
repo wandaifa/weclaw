@@ -303,7 +303,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 		for _, perm := range handler.PermissionsSnapshot() {
 			infos = append(infos, api.UserPermissionInfo{
-				UserID: perm.UserID, Level: string(perm.Level), DailyLimit: perm.DailyLimit,
+				UserID: perm.UserID, Level: string(perm.Level), DailyLimit: perm.DailyLimit, Blocked: perm.Blocked,
 			})
 		}
 		return infos
@@ -316,12 +316,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return api.UserPermissionInfo{}, err
 		}
-		perm := config.UserPermission{Level: level, DailyLimit: req.DailyLimit}
 
 		configMu.Lock()
 		if cfg.UserPermissions == nil {
 			cfg.UserPermissions = make(map[string]config.UserPermission)
 		}
+		// Preserve any existing Blocked flag: saving level/quota here must
+		// never clobber a block set through the separate block endpoint.
+		blocked := cfg.UserPermissions[req.UserID].Blocked
+		perm := config.UserPermission{Level: level, DailyLimit: req.DailyLimit, Blocked: blocked}
 		cfg.UserPermissions[req.UserID] = perm
 		saveErr := config.Save(cfg)
 		configMu.Unlock()
@@ -330,7 +333,31 @@ func runStart(cmd *cobra.Command, args []string) error {
 		}
 
 		handler.SetUserPermission(req.UserID, perm)
-		return api.UserPermissionInfo{UserID: req.UserID, Level: string(level), DailyLimit: req.DailyLimit}, nil
+		return api.UserPermissionInfo{UserID: req.UserID, Level: string(level), DailyLimit: req.DailyLimit, Blocked: blocked}, nil
+	})
+	apiServer.SetPermissionBlockController(func(_ context.Context, req api.PermissionBlockRequest) (api.UserPermissionInfo, error) {
+		if config.IsOwner(req.UserID) {
+			return api.UserPermissionInfo{}, fmt.Errorf("cannot block the owner")
+		}
+
+		configMu.Lock()
+		if cfg.UserPermissions == nil {
+			cfg.UserPermissions = make(map[string]config.UserPermission)
+		}
+		perm := cfg.UserPermissions[req.UserID]
+		if perm.Level == "" {
+			perm.Level = config.PermissionReadOnly
+		}
+		perm.Blocked = req.Blocked
+		cfg.UserPermissions[req.UserID] = perm
+		saveErr := config.Save(cfg)
+		configMu.Unlock()
+		if saveErr != nil {
+			return api.UserPermissionInfo{}, saveErr
+		}
+
+		handler.SetUserPermission(req.UserID, perm)
+		return api.UserPermissionInfo{UserID: req.UserID, Level: string(perm.Level), DailyLimit: perm.DailyLimit, Blocked: perm.Blocked}, nil
 	})
 	apiServer.SetUsageProvider(func() []api.UsageInfo {
 		entries := handler.UsageSnapshot()

@@ -307,6 +307,76 @@ func TestHandlePermissionsReadsAndUpdates(t *testing.T) {
 	}
 }
 
+func TestHandlePermissionsBlockIsIndependentOfLevelSave(t *testing.T) {
+	stored := map[string]UserPermissionInfo{}
+	server := NewServer(nil, "")
+	server.SetPermissionController(func(_ context.Context, req PermissionSetRequest) (UserPermissionInfo, error) {
+		// Mirrors cmd/start.go: a level/quota save must preserve whatever
+		// Blocked was already set, never reset it.
+		info := UserPermissionInfo{UserID: req.UserID, Level: req.Level, DailyLimit: req.DailyLimit, Blocked: stored[req.UserID].Blocked}
+		stored[req.UserID] = info
+		return info, nil
+	})
+	server.SetPermissionBlockController(func(_ context.Context, req PermissionBlockRequest) (UserPermissionInfo, error) {
+		info := stored[req.UserID]
+		info.UserID = req.UserID
+		info.Blocked = req.Blocked
+		stored[req.UserID] = info
+		return info, nil
+	})
+
+	block := httptest.NewRequest(http.MethodPost, PermissionsBlockPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","blocked":true}`))
+	block.RemoteAddr = "127.0.0.1:12345"
+	blockResp := httptest.NewRecorder()
+	server.handlePermissionsBlock(blockResp, block)
+	if blockResp.Code != http.StatusOK || !strings.Contains(blockResp.Body.String(), `"blocked":true`) {
+		t.Fatalf("block POST = %d %s", blockResp.Code, blockResp.Body.String())
+	}
+
+	// Saving a new level/quota afterwards must not clear the block.
+	save := httptest.NewRequest(http.MethodPost, PermissionsPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","level":"workspace_write","daily_limit":30}`))
+	save.RemoteAddr = "127.0.0.1:12345"
+	saveResp := httptest.NewRecorder()
+	server.handlePermissions(saveResp, save)
+	if saveResp.Code != http.StatusOK {
+		t.Fatalf("level save POST = %d %s", saveResp.Code, saveResp.Body.String())
+	}
+	if got := stored["someone@im.wechat"]; !got.Blocked {
+		t.Fatalf("level save must not clear Blocked, got %+v", got)
+	}
+
+	// Unblocking must not touch the level/quota that was set above.
+	unblock := httptest.NewRequest(http.MethodPost, PermissionsBlockPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","blocked":false}`))
+	unblock.RemoteAddr = "127.0.0.1:12345"
+	unblockResp := httptest.NewRecorder()
+	server.handlePermissionsBlock(unblockResp, unblock)
+	if unblockResp.Code != http.StatusOK {
+		t.Fatalf("unblock POST = %d %s", unblockResp.Code, unblockResp.Body.String())
+	}
+	if got := stored["someone@im.wechat"]; got.Blocked || got.Level != "workspace_write" || got.DailyLimit != 30 {
+		t.Fatalf("unblock must preserve level/quota, got %+v", got)
+	}
+}
+
+func TestHandlePermissionsBlockRejectsNonLoopback(t *testing.T) {
+	called := false
+	server := NewServer(nil, "")
+	server.SetPermissionBlockController(func(_ context.Context, req PermissionBlockRequest) (UserPermissionInfo, error) {
+		called = true
+		return UserPermissionInfo{}, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, PermissionsBlockPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","blocked":true}`))
+	req.RemoteAddr = "192.0.2.1:12345"
+	resp := httptest.NewRecorder()
+	server.handlePermissionsBlock(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.Code)
+	}
+	if called {
+		t.Fatal("controller should not be called for a non-loopback request")
+	}
+}
+
 func TestHandlePermissionsRejectsNonLoopback(t *testing.T) {
 	called := false
 	server := NewServer(nil, "")

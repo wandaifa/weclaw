@@ -75,6 +75,11 @@ const DefaultDailyMessageLimit = 50
 type UserPermission struct {
 	Level      PermissionLevel `json:"level"`
 	DailyLimit int             `json:"daily_limit,omitempty"` // 0 = use DefaultDailyMessageLimit
+	// Blocked refuses this user's messages before they reach an agent,
+	// independent of AccessMode and of Level/DailyLimit — set via a
+	// dedicated action, not the level/quota save, so the two never
+	// clobber each other.
+	Blocked bool `json:"blocked,omitempty"`
 }
 
 // ParsePermissionLevel validates a level string from the internal permissions API.

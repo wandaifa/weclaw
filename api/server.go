@@ -24,6 +24,7 @@ const (
 	MediaRetentionPath   = "/api/internal/settings/media-retention"
 	AccessModePath       = "/api/internal/settings/access-mode"
 	PermissionsPath      = "/api/internal/permissions"
+	PermissionsBlockPath = "/api/internal/permissions/block"
 	PermissionsUsagePath = "/api/internal/permissions/usage"
 )
 
@@ -95,6 +96,11 @@ type UserPermissionInfo struct {
 	Level      string `json:"level"` // "read_only" | "workspace_write"
 	DailyLimit int    `json:"daily_limit"`
 	IsOwner    bool   `json:"is_owner"`
+	// Blocked refuses this user's messages before they reach an agent,
+	// independent of Level/DailyLimit and of AccessMode. Set only through
+	// PermissionsBlockPath, never through the level/quota save below, so
+	// the two actions can't clobber each other.
+	Blocked bool `json:"blocked"`
 }
 
 // PermissionsProvider lists every non-owner user seen so far with their
@@ -110,6 +116,19 @@ type PermissionSetRequest struct {
 
 // PermissionController persists and immediately applies one user's tier.
 type PermissionController func(context.Context, PermissionSetRequest) (UserPermissionInfo, error)
+
+// PermissionBlockRequest is the JSON body for POST /api/internal/permissions/block.
+// It is deliberately a separate request/endpoint from PermissionSetRequest so
+// that blocking a user and saving their level/quota are two independent
+// actions that never clobber each other.
+type PermissionBlockRequest struct {
+	UserID  string `json:"user_id"`
+	Blocked bool   `json:"blocked"`
+}
+
+// PermissionBlockController persists and immediately applies one user's
+// blocked flag, leaving their Level/DailyLimit untouched.
+type PermissionBlockController func(context.Context, PermissionBlockRequest) (UserPermissionInfo, error)
 
 // UsageInfo is one non-owner user's message count for the current local day.
 type UsageInfo struct {
@@ -139,6 +158,7 @@ type Server struct {
 	setAccessMode     AccessModeController
 	permissions       PermissionsProvider
 	setPermission     PermissionController
+	blockPermission   PermissionBlockController
 	usage             UsageProvider
 	addr              string
 }
@@ -238,6 +258,14 @@ func (s *Server) SetPermissionController(controller PermissionController) {
 	s.setPermission = controller
 }
 
+// SetPermissionBlockController enables blocking/unblocking one user through
+// the loopback API, independent of SetPermissionController.
+func (s *Server) SetPermissionBlockController(controller PermissionBlockController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.blockPermission = controller
+}
+
 // SetUsageProvider exposes today's quota usage through the loopback-only usage endpoint.
 func (s *Server) SetUsageProvider(provider UsageProvider) {
 	s.mu.Lock()
@@ -267,6 +295,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(MediaRetentionPath, s.handleMediaRetention)
 	mux.HandleFunc(AccessModePath, s.handleAccessMode)
 	mux.HandleFunc(PermissionsPath, s.handlePermissions)
+	mux.HandleFunc(PermissionsBlockPath, s.handlePermissionsBlock)
 	mux.HandleFunc(PermissionsUsagePath, s.handlePermissionsUsage)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -682,6 +711,36 @@ func (s *Server) handlePermissions(w http.ResponseWriter, r *http.Request) {
 	updated, err := controller(r.Context(), req)
 	if err != nil {
 		http.Error(w, "invalid permission update: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handlePermissionsBlock(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	controller := s.blockPermission
+	s.mu.RUnlock()
+	if controller == nil {
+		http.Error(w, "permissions are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req PermissionBlockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
+		return
+	}
+	updated, err := controller(r.Context(), req)
+	if err != nil {
+		http.Error(w, "invalid block update: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

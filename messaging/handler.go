@@ -265,14 +265,20 @@ func (h *Handler) AccessMode() config.AccessMode {
 func (h *Handler) checkAccess(userID string) bool {
 	h.mu.RLock()
 	mode := h.accessMode.OrDefault()
-	_, allowlisted := h.permissions[userID]
+	perm, configured := h.permissions[userID]
 	h.mu.RUnlock()
+
+	// A per-user block always wins, regardless of AccessMode: a blocked user
+	// stays blocked whether the mode is public, allowlist, or owner_only.
+	if configured && perm.Blocked {
+		return false
+	}
 
 	switch mode {
 	case config.AccessOwnerOnly:
 		return false
 	case config.AccessAllowlist:
-		return allowlisted
+		return configured
 	default: // config.AccessPublic
 		return true
 	}
@@ -288,6 +294,7 @@ type PermissionSnapshot struct {
 	UserID     string
 	Level      config.PermissionLevel
 	DailyLimit int
+	Blocked    bool
 }
 
 // PermissionsSnapshot lists every non-owner user with an explicitly
@@ -301,7 +308,7 @@ func (h *Handler) PermissionsSnapshot() []PermissionSnapshot {
 	defer h.mu.RUnlock()
 	out := make([]PermissionSnapshot, 0, len(h.permissions))
 	for userID, perm := range h.permissions {
-		out = append(out, PermissionSnapshot{UserID: userID, Level: perm.Level, DailyLimit: perm.DailyLimit})
+		out = append(out, PermissionSnapshot{UserID: userID, Level: perm.Level, DailyLimit: perm.DailyLimit, Blocked: perm.Blocked})
 	}
 	return out
 }

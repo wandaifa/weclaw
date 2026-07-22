@@ -794,6 +794,33 @@ func TestAccessGateRefusesBeforeAgentCallInOwnerOnlyMode(t *testing.T) {
 	}
 }
 
+func TestCheckAccessBlockedUserRefusedRegardlessOfMode(t *testing.T) {
+	for _, mode := range []config.AccessMode{config.AccessPublic, config.AccessAllowlist, config.AccessOwnerOnly} {
+		h := newTestHandler()
+		h.SetAccessMode(mode)
+		h.SetUserPermission("blocked@im.wechat", config.UserPermission{Level: config.PermissionWorkspaceWrite, Blocked: true})
+		if h.checkAccess("blocked@im.wechat") {
+			t.Fatalf("mode=%q: a blocked user must be refused even with an otherwise-permissive level", mode)
+		}
+	}
+}
+
+func TestCheckAccessLevelSaveDoesNotImplicitlyUnblock(t *testing.T) {
+	h := newTestHandler()
+	h.SetAccessMode(config.AccessPublic)
+	h.SetUserPermission("blocked@im.wechat", config.UserPermission{Level: config.PermissionReadOnly, Blocked: true})
+	if h.checkAccess("blocked@im.wechat") {
+		t.Fatal("expected user to be blocked after SetUserPermission with Blocked=true")
+	}
+	// Unblocking (Blocked: false) is what should restore access — this just
+	// pins down that checkAccess reads the current Blocked flag each call,
+	// not a cached decision.
+	h.SetUserPermission("blocked@im.wechat", config.UserPermission{Level: config.PermissionReadOnly, Blocked: false})
+	if !h.checkAccess("blocked@im.wechat") {
+		t.Fatal("expected user to regain access once Blocked is cleared")
+	}
+}
+
 func TestAccessGateDoesNotBlockOwnerRegardlessOfMode(t *testing.T) {
 	srv, _ := newFakeIlinkServer(t)
 	defer srv.Close()
