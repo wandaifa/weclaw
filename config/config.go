@@ -11,6 +11,7 @@ import (
 // Config holds the application configuration.
 type Config struct {
 	DefaultAgent    string                    `json:"default_agent"`
+	AccessMode      AccessMode                `json:"access_mode,omitempty"`
 	UserAgents      map[string]string         `json:"user_agents,omitempty"`
 	UserPermissions map[string]UserPermission `json:"user_permissions,omitempty"`
 	APIAddr         string                    `json:"api_addr,omitempty"`
@@ -18,6 +19,45 @@ type Config struct {
 	MessageMerge    MessageMergeConfig        `json:"message_merge,omitempty"`
 	MediaRetention  MediaRetentionConfig      `json:"media_retention,omitempty"`
 	Agents          map[string]AgentConfig    `json:"agents"`
+}
+
+// AccessMode gates whether a non-owner user's message reaches an agent at
+// all, before any per-user sandbox tier or quota is even considered.
+type AccessMode string
+
+const (
+	// AccessPublic is today's long-standing behavior: any WeChat user who
+	// messages the bot is routed to an agent (subject to their permission
+	// tier and daily quota). This is the default for legacy config files
+	// that predate access_mode.
+	AccessPublic AccessMode = "public"
+	// AccessAllowlist only lets through the owner plus users who already
+	// have an explicit entry in UserPermissions (i.e. someone the owner has
+	// set a tier for via the permissions admin page). Anyone else is
+	// refused before reaching an agent.
+	AccessAllowlist AccessMode = "allowlist"
+	// AccessOwnerOnly refuses every non-owner message before it reaches an
+	// agent.
+	AccessOwnerOnly AccessMode = "owner_only"
+)
+
+// ParseAccessMode validates a mode string from the internal permissions API.
+func ParseAccessMode(s string) (AccessMode, error) {
+	switch AccessMode(s) {
+	case AccessPublic, AccessAllowlist, AccessOwnerOnly:
+		return AccessMode(s), nil
+	default:
+		return "", fmt.Errorf("unknown access mode %q", s)
+	}
+}
+
+// OrDefault treats an empty mode (legacy config files saved before
+// access_mode existed) as AccessPublic, preserving today's behavior.
+func (m AccessMode) OrDefault() AccessMode {
+	if m == "" {
+		return AccessPublic
+	}
+	return m
 }
 
 // PermissionLevel is a non-owner user's sandbox tier for the shared codex agent.

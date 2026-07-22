@@ -36,6 +36,7 @@ type AgentMeta struct {
 type Handler struct {
 	mu            sync.RWMutex
 	defaultName   string
+	accessMode    config.AccessMode                // gates whether a non-owner reaches an agent at all
 	userAgents    map[string]string                // user ID -> selected agent; falls back to defaultName
 	permissions   map[string]config.UserPermission // user ID -> sandbox tier (non-owner only)
 	agents        map[string]agent.Agent           // name -> running agent
@@ -240,6 +241,45 @@ func (h *Handler) SetUserPermission(userID string, perm config.UserPermission) {
 	h.mu.Lock()
 	h.permissions[userID] = perm
 	h.mu.Unlock()
+}
+
+// SetAccessMode updates the gate deciding whether non-owner messages reach
+// an agent at all. Called at startup (restoring config) and by the internal
+// permissions API after saving a change.
+func (h *Handler) SetAccessMode(mode config.AccessMode) {
+	h.mu.Lock()
+	h.accessMode = mode
+	h.mu.Unlock()
+}
+
+// AccessMode returns the currently configured access mode, for the internal
+// permissions API and /status.
+func (h *Handler) AccessMode() config.AccessMode {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.accessMode.OrDefault()
+}
+
+// checkAccess reports whether userID (already known not to be the owner) may
+// have their message routed to an agent under the current access mode.
+func (h *Handler) checkAccess(userID string) bool {
+	h.mu.RLock()
+	mode := h.accessMode.OrDefault()
+	_, allowlisted := h.permissions[userID]
+	h.mu.RUnlock()
+
+	switch mode {
+	case config.AccessOwnerOnly:
+		return false
+	case config.AccessAllowlist:
+		return allowlisted
+	default: // config.AccessPublic
+		return true
+	}
+}
+
+func accessDeniedReply() string {
+	return "抱歉，当前模型 token 消耗完毕，欠费啦 ~"
 }
 
 // PermissionSnapshot describes one non-owner user's configured tier, for the
@@ -620,6 +660,15 @@ func chatKey(client *ilink.Client, userID string) string {
 
 // handleMessage processes one already queued incoming message.
 func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg ilink.WeixinMessage) {
+	// Access gate: applies before any per-type handling (text, image, video,
+	// file) so a refused user can't reach an agent via any message kind.
+	if !config.IsOwner(msg.FromUserID) && !h.checkAccess(msg.FromUserID) {
+		if err := SendTextReply(ctx, client, msg.FromUserID, accessDeniedReply(), msg.ContextToken, NewClientID()); err != nil {
+			log.Printf("[handler] failed to send access-denied reply to %s: %v", msg.FromUserID, err)
+		}
+		return
+	}
+
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
 	if text == "" {

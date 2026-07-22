@@ -22,6 +22,7 @@ const (
 	AccountsDeletedPath  = "/api/internal/accounts/deleted"
 	MessageMergePath     = "/api/internal/settings/message-merge"
 	MediaRetentionPath   = "/api/internal/settings/media-retention"
+	AccessModePath       = "/api/internal/settings/access-mode"
 	PermissionsPath      = "/api/internal/permissions"
 	PermissionsUsagePath = "/api/internal/permissions/usage"
 )
@@ -76,6 +77,16 @@ type MediaRetentionSettings struct {
 type MediaRetentionProvider func() MediaRetentionSettings
 type MediaRetentionController func(context.Context, MediaRetentionSettings) (MediaRetentionSettings, error)
 
+// AccessModeSettings is the JSON-safe representation of the non-owner access
+// gate: "public" (today's default), "allowlist" (owner + users with an
+// explicit permission entry), or "owner_only" (refuse all non-owner messages).
+type AccessModeSettings struct {
+	Mode string `json:"mode"`
+}
+
+type AccessModeProvider func() AccessModeSettings
+type AccessModeController func(context.Context, AccessModeSettings) (AccessModeSettings, error)
+
 // UserPermissionInfo describes one WeChat user's configured sandbox tier for
 // the internal permissions API. Owners are listed read-only (IsOwner=true)
 // and cannot be changed through this API.
@@ -124,6 +135,8 @@ type Server struct {
 	setMerge          MessageMergeController
 	mediaRetention    MediaRetentionProvider
 	setMediaRetention MediaRetentionController
+	accessMode        AccessModeProvider
+	setAccessMode     AccessModeController
 	permissions       PermissionsProvider
 	setPermission     PermissionController
 	usage             UsageProvider
@@ -197,6 +210,20 @@ func (s *Server) SetMediaRetentionController(controller MediaRetentionController
 	s.setMediaRetention = controller
 }
 
+// SetAccessModeProvider exposes the non-owner access gate through the loopback-only settings endpoint.
+func (s *Server) SetAccessModeProvider(provider AccessModeProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.accessMode = provider
+}
+
+// SetAccessModeController enables changing the non-owner access gate through the loopback API.
+func (s *Server) SetAccessModeController(controller AccessModeController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setAccessMode = controller
+}
+
 // SetPermissionsProvider exposes per-user sandbox tiers through the loopback-only permissions endpoint.
 func (s *Server) SetPermissionsProvider(provider PermissionsProvider) {
 	s.mu.Lock()
@@ -238,6 +265,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(AccountsDeletedPath, s.handleDeletedAccounts)
 	mux.HandleFunc(MessageMergePath, s.handleMessageMerge)
 	mux.HandleFunc(MediaRetentionPath, s.handleMediaRetention)
+	mux.HandleFunc(AccessModePath, s.handleAccessMode)
 	mux.HandleFunc(PermissionsPath, s.handlePermissions)
 	mux.HandleFunc(PermissionsUsagePath, s.handlePermissionsUsage)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -575,6 +603,45 @@ func (s *Server) handleMediaRetention(w http.ResponseWriter, r *http.Request) {
 	updated, err := controller(r.Context(), settings)
 	if err != nil {
 		http.Error(w, "invalid media retention settings: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handleAccessMode(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider, controller := s.accessMode, s.setAccessMode
+	s.mu.RUnlock()
+	if r.Method == http.MethodGet {
+		if provider == nil {
+			http.Error(w, "access mode is unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(provider())
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if controller == nil {
+		http.Error(w, "access mode is unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var settings AccessModeSettings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	updated, err := controller(r.Context(), settings)
+	if err != nil {
+		http.Error(w, "invalid access mode: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

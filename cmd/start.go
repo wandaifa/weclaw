@@ -169,6 +169,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	handler.SetUserAgents(cfg.UserAgents)
 	handler.SetUserPermissions(cfg.UserPermissions)
+	handler.SetAccessMode(cfg.AccessMode)
 
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
@@ -276,6 +277,24 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return api.MediaRetentionSettings{}, err
 		}
 		return api.MediaRetentionSettings{Days: cfg.MediaRetention.Days}, nil
+	})
+	apiServer.SetAccessModeProvider(func() api.AccessModeSettings {
+		return api.AccessModeSettings{Mode: string(handler.AccessMode())}
+	})
+	apiServer.SetAccessModeController(func(_ context.Context, settings api.AccessModeSettings) (api.AccessModeSettings, error) {
+		mode, err := config.ParseAccessMode(settings.Mode)
+		if err != nil {
+			return api.AccessModeSettings{}, err
+		}
+		configMu.Lock()
+		cfg.AccessMode = mode
+		saveErr := config.Save(cfg)
+		configMu.Unlock()
+		if saveErr != nil {
+			return api.AccessModeSettings{}, saveErr
+		}
+		handler.SetAccessMode(mode)
+		return api.AccessModeSettings{Mode: string(mode)}, nil
 	})
 	apiServer.SetPermissionsProvider(func() []api.UserPermissionInfo {
 		infos := make([]api.UserPermissionInfo, 0)

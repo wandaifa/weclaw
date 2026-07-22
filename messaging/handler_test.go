@@ -724,3 +724,91 @@ func TestDailyQuotaResetsOnNewDay(t *testing.T) {
 		t.Fatal("quota should reset once the local date changes")
 	}
 }
+
+func TestAccessModeDefaultsToPublic(t *testing.T) {
+	h := newTestHandler()
+	if got := h.AccessMode(); got != config.AccessPublic {
+		t.Fatalf("default AccessMode() = %q, want %q", got, config.AccessPublic)
+	}
+	if !h.checkAccess("anyone@im.wechat") {
+		t.Fatal("public mode should allow any non-owner user")
+	}
+}
+
+func TestAccessModeOwnerOnlyBlocksEveryNonOwner(t *testing.T) {
+	h := newTestHandler()
+	h.SetAccessMode(config.AccessOwnerOnly)
+	if h.checkAccess("stranger@im.wechat") {
+		t.Fatal("owner_only mode should refuse every non-owner user")
+	}
+	// Even a user with an explicit permission entry is still refused: owner_only
+	// means owner_only, not "owner + allowlist".
+	h.SetUserPermission("configured@im.wechat", config.UserPermission{Level: config.PermissionWorkspaceWrite})
+	if h.checkAccess("configured@im.wechat") {
+		t.Fatal("owner_only mode should refuse non-owner users regardless of permission entries")
+	}
+}
+
+func TestAccessModeAllowlistOnlyAllowsConfiguredUsers(t *testing.T) {
+	h := newTestHandler()
+	h.SetAccessMode(config.AccessAllowlist)
+	if h.checkAccess("stranger@im.wechat") {
+		t.Fatal("allowlist mode should refuse a user with no permission entry")
+	}
+	h.SetUserPermission("configured@im.wechat", config.UserPermission{Level: config.PermissionReadOnly})
+	if !h.checkAccess("configured@im.wechat") {
+		t.Fatal("allowlist mode should allow a user with an existing permission entry")
+	}
+}
+
+func TestAccessGateRefusesBeforeAgentCallInOwnerOnlyMode(t *testing.T) {
+	srv, sent := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+	h.SetAccessMode(config.AccessOwnerOnly)
+	// Plain text without a "/" or "@" prefix waits out the consecutive-message
+	// merge idle delay before dispatching; use the minimum allowed so this
+	// test doesn't sit through the 3s default.
+	if err := h.SetMergeSettings(MergeSettings{IdleDelay: time.Second, MaxWait: time.Second, MaxMessages: 10, MaxChars: 4000}); err != nil {
+		t.Fatalf("SetMergeSettings: %v", err)
+	}
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	h.HandleMessage(context.Background(), client, newTestMessage("stranger@im.wechat", "hello", 20))
+
+	waitFor(t, 4*time.Second, func() bool { return len(sent.snapshot()) >= 1 })
+	if calls := fake.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("owner_only mode should never let a stranger's message reach the agent, got calls=%v", calls)
+	}
+	found := false
+	for _, text := range sent.snapshot() {
+		if text == accessDeniedReply() {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected access-denied reply to be sent, got %v", sent.snapshot())
+	}
+}
+
+func TestAccessGateDoesNotBlockOwnerRegardlessOfMode(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+	h.SetAccessMode(config.AccessOwnerOnly)
+	if err := h.SetMergeSettings(MergeSettings{IdleDelay: time.Second, MaxWait: time.Second, MaxMessages: 10, MaxChars: 4000}); err != nil {
+		t.Fatalf("SetMergeSettings: %v", err)
+	}
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	ownerID := config.OwnerUserIDs()[0]
+	h.HandleMessage(context.Background(), client, newTestMessage(ownerID, "hello", 21))
+
+	waitFor(t, 4*time.Second, func() bool { return len(fake.callsSnapshot()) == 1 })
+}

@@ -177,6 +177,41 @@ func TestParsePermissionLevel(t *testing.T) {
 	}
 }
 
+func TestParseAccessMode(t *testing.T) {
+	for _, valid := range []string{"public", "allowlist", "owner_only"} {
+		if _, err := ParseAccessMode(valid); err != nil {
+			t.Fatalf("%q should be valid: %v", valid, err)
+		}
+	}
+	if _, err := ParseAccessMode("nonsense"); err == nil {
+		t.Fatal("unknown access mode should be rejected")
+	}
+}
+
+func TestAccessModeOrDefault(t *testing.T) {
+	if got := AccessMode("").OrDefault(); got != AccessPublic {
+		t.Fatalf("empty AccessMode.OrDefault() = %q, want public (legacy config files predate access_mode)", got)
+	}
+	if got := AccessOwnerOnly.OrDefault(); got != AccessOwnerOnly {
+		t.Fatalf("AccessOwnerOnly.OrDefault() = %q, want unchanged", got)
+	}
+}
+
+func TestAccessModeRoundTrip(t *testing.T) {
+	cfg := Config{AccessMode: AccessAllowlist}
+	data, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.AccessMode != AccessAllowlist {
+		t.Fatalf("AccessMode = %q, want allowlist", out.AccessMode)
+	}
+}
+
 func TestIsOwner(t *testing.T) {
 	for _, id := range OwnerUserIDs() {
 		if !IsOwner(id) {
