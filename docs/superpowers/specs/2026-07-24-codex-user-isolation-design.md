@@ -44,9 +44,16 @@
 }
 ```
 
-`~/.weclaw/codex-shared-home/` 由 weclaw 启动时确保存在（类似一期 `persona.EnsureDefault` 的角色）：目录里只放一个指向真实 `~/.codex/auth.json` 的软链（登录态自动跟着真实账号走，token 轮转不用维护同步），不软链 `AGENTS.md`/`memories`/`config.toml` 等——天然隔离，不需要额外的"排除逻辑"。
+`~/.weclaw/codex-shared-home/` 由 weclaw 启动时确保存在（类似一期 `persona.EnsureDefault` 的角色）：目录里放一个指向真实 `~/.codex/auth.json` 的软链（登录态自动跟着真实账号走，token 轮转不用维护同步），不软链 `AGENTS.md`/`memories`——天然隔离，不需要额外的"排除逻辑"。
 
-owner 继续用现有的 `codex` 条目（真实 `CODEX_HOME`，行为完全不变）。
+**`config.toml` 不是"带不带"的二选一，是单独写一份精简版**（不软链真实那份，两边完全独立，改一边不影响另一边）。核实过真实账号 `~/.codex/config.toml` 里实际有意义的几项：
+
+- `approval_policy`/`sandbox_mode`：**不用管**，weclaw 自己在 `getOrCreateThread` 构造 `thread/start` 参数时已经显式传了 `approvalPolicy`/`sandbox`（`codexSandboxParams` 算出来的），程序传的值本来就盖过 config.toml，带不带这两项都没区别。
+- `sandbox_workspace_write.network_access`：真实账号是 `true`。**这条必须在精简 config.toml 里显式写 `true`**——如果落到 codex 默认的"不联网"，生图这类需要联网的能力大概率跑不通，等于白隔离了。
+- `[[hooks.Stop]]`（token-tracker 状态栏脚本）、`[projects...] trust_level`：真实账号里这些是梁师傅个人终端习惯用的东西，跟 bot 回复内容无关，`codex-shared` 不带。
+- `model`/`model_reasoning_effort`：**梁师傅要求单独控制、不跟随真实账号**——非 owner 走这个高频路径，用真实账号那个 `high` 推理强度档位成本会明显更高。走 weclaw 自己已有的机制：`agents.codex-shared` 配置条目的 `model` 字段（跟 `getOrCreateThread` 里 `params["model"] = a.model` 这条现成的 per-thread 覆盖一样，`ACPAgentConfig.Model` 早就有了，不用新增字段），具体档位留给梁师傅在 config.json 里配置决定，本设计不预设具体模型名。`model_reasoning_effort` 目前没找到对应的 `thread/start` 顶层参数，**写实施计划前需要先实测**它到底能不能通过 `thread/start` 的 `config` 覆盖对象生效（今天已经证明这个 `config` 覆盖对 `project_doc_max_bytes` 不生效，不能想当然认为对其他 key 也不生效或生效，必须单独测）——测不出来就先用 codex 默认推理强度，不强求。
+
+owner 继续用现有的 `codex` 条目（真实 `CODEX_HOME`、真实 `config.toml`、真实 `model`，行为完全不变）。
 
 ### 2. `ACPAgent` 补 `PersonaAwareAgent` 接口
 
@@ -82,12 +89,15 @@ NonOwnerDefaultAgent      string `json:"non_owner_default_agent,omitempty"`
 AllowNonOwnerAgentSwitch  bool   `json:"allow_non_owner_agent_switch,omitempty"`
 ```
 
+`~/.weclaw/codex-shared-home/config.toml` 是新增的、独立维护的一份精简配置（不进 weclaw 仓库、不进 git，跟 `~/.weclaw/` 下其他运行时产物一样是本机状态），内容只有 `sandbox_workspace_write.network_access = true` 这一条是本设计明确要求的；由 weclaw 启动时确保存在（同一处逻辑负责建目录、建软链、写这份精简 config.toml，若已存在则不覆盖，避免抹掉手工调整）。
+
 ## 测试计划
 
+- **写实施计划前的实测前置任务**：确认 `model_reasoning_effort` 能否通过 `thread/start` 的 `config` 覆盖对象生效（今天已经证明这个 `config` 覆盖对 `project_doc_max_bytes` 不生效，不能假设对其他 key 也不生效或生效，必须单独拿真实 `app-server` 进程测一次）。测出结果再决定要不要把它也做成可配置项，测不出来就先用 codex 默认值，不阻塞其余任务。
 - `agent` 包：`ACPAgent` 实现 `PersonaAwareAgent` 的单测（`getOrCreateThread` 在有 override 时 `thread/start` 参数带 `baseInstructions`，无 override/owner 时不带）；`codexGeneratedImagePaths(home, threadID)` 改造后的参数化测试。
 - `messaging` 包：`selectedAgent()` 在 `AllowNonOwnerAgentSwitch=false`/`true` 两种状态下的路由行为；`AllowNonOwnerAgentSwitch=true` 时非 owner 切换只能命中白名单内的两个 agent。
 - `config` 包：新字段的 JSON round-trip + legacy 配置兼容（字段不存在时 `NonOwnerDefaultAgent` 空值要在使用处兜底成 `"codex-shared"`，不能让空字符串直接当 agent 名字用）。
-- **手动实测（不可省略，这是一期教训直接换来的纪律）**：weclaw 编译、`codex-shared` 条目跑起来后，拿真实非 owner 微信号发消息，人工确认回复不含任何私人信息、且请求生成一张图片能正常收到——不能只看单测绿、只看参数拼对了就当验证过。
+- **手动实测（不可省略，这是一期教训直接换来的纪律）**：weclaw 编译、`codex-shared` 条目跑起来后，拿真实非 owner 微信号发消息，人工确认回复不含任何私人信息、且请求生成一张图片能正常收到（重点验证 `network_access=true` 那条精简配置真的让生图跑通了）——不能只看单测绿、只看参数拼对了就当验证过。
 
 ## 范围之外（本期不做）
 
