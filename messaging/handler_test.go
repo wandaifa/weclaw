@@ -901,6 +901,13 @@ func TestPersonaOverrideResolutionPriority(t *testing.T) {
 	if override.SettingSources != "project,local" {
 		t.Fatalf("override.SettingSources = %q, want %q", override.SettingSources, "project,local")
 	}
+
+	// Configured default persona tier: SetDefaultPersona -> unbound user picks up configured default.
+	h.SetDefaultPersona("vip")
+	name, override = h.personaOverride("user-c")
+	if name != "vip" || override.SystemPrompt != "VIP人格" {
+		t.Fatalf("unbound user with configured default got (%q, %q), want (\"vip\", \"VIP人格\")", name, override.SystemPrompt)
+	}
 }
 
 func TestChatWithAgentInjectsPersonaOverrideForNonOwner(t *testing.T) {
