@@ -22,7 +22,8 @@ type CLIAgent struct {
 	model        string
 	systemPrompt string
 	mu           sync.Mutex
-	sessions     map[string]string // conversationID -> session ID for multi-turn
+	sessions     map[string]string          // conversationID -> session ID for multi-turn
+	personas     map[string]PersonaOverride // conversationID -> persona override (claude only)
 }
 
 // CLIAgentConfig holds configuration for a CLI agent.
@@ -51,6 +52,7 @@ func NewCLIAgent(cfg CLIAgentConfig) *CLIAgent {
 		model:        cfg.Model,
 		systemPrompt: cfg.SystemPrompt,
 		sessions:     make(map[string]string),
+		personas:     make(map[string]PersonaOverride),
 	}
 }
 
@@ -102,6 +104,15 @@ func (a *CLIAgent) SetCwd(cwd string) {
 	a.cwd = cwd
 }
 
+// SetPersonaOverride records the persona override for one conversationID,
+// applied on the next Chat call for the claude backend. No-op for codex
+// (chatCodex never reads a.personas).
+func (a *CLIAgent) SetPersonaOverride(conversationID string, override PersonaOverride) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.personas[conversationID] = override
+}
+
 // Chat sends a message to the CLI agent and returns the response.
 func (a *CLIAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
 	switch a.name {
@@ -114,24 +125,14 @@ func (a *CLIAgent) Chat(ctx context.Context, conversationID string, message stri
 
 // chatClaude uses claude -p with stream-json to get structured output and session persistence.
 func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, message string) (string, error) {
-	args := []string{"-p", message, "--output-format", "stream-json", "--verbose"}
-
-	if a.model != "" {
-		args = append(args, "--model", a.model)
-	}
-	if a.systemPrompt != "" {
-		args = append(args, "--append-system-prompt", a.systemPrompt)
-	}
-	// Append extra args from config (e.g. --dangerously-skip-permissions)
-	args = append(args, a.args...)
-
-	// Resume existing session for multi-turn conversation
 	a.mu.Lock()
+	override := a.personas[conversationID]
 	sessionID, hasSession := a.sessions[conversationID]
 	a.mu.Unlock()
 
+	args := buildClaudeArgs(message, a.model, a.systemPrompt, a.args, override, sessionID, hasSession)
+
 	if hasSession {
-		args = append(args, "--resume", sessionID)
 		log.Printf("[cli] resuming session (command=%s, session=%s, conversation=%s)", a.command, sessionID, conversationID)
 	} else {
 		log.Printf("[cli] starting new conversation (command=%s, conversation=%s)", a.command, conversationID)
@@ -237,6 +238,39 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	}
 
 	return result, nil
+}
+
+// buildClaudeArgs assembles the claude CLI argument list for one turn. It is
+// a pure function so persona injection can be tested without spawning a
+// real claude process.
+func buildClaudeArgs(message, model, systemPrompt string, extraArgs []string, override PersonaOverride, sessionID string, hasSession bool) []string {
+	args := []string{"-p", message, "--output-format", "stream-json", "--verbose"}
+
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+	if override.SettingSources != "" {
+		args = append(args, "--setting-sources", override.SettingSources)
+	}
+
+	combinedPrompt := systemPrompt
+	if override.SystemPrompt != "" {
+		if combinedPrompt != "" {
+			combinedPrompt = combinedPrompt + "\n\n" + override.SystemPrompt
+		} else {
+			combinedPrompt = override.SystemPrompt
+		}
+	}
+	if combinedPrompt != "" {
+		args = append(args, "--append-system-prompt", combinedPrompt)
+	}
+
+	args = append(args, extraArgs...)
+
+	if hasSession {
+		args = append(args, "--resume", sessionID)
+	}
+	return args
 }
 
 // chatCodex handles codex CLI invocation using "codex exec".

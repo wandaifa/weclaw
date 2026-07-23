@@ -126,6 +126,30 @@ type PolicyAwareAgent interface {
 	SetConversationPolicy(conversationID string, policy ConversationPolicy)
 }
 
+// PersonaOverride carries per-conversation persona injection for agents that
+// can switch identity per user on top of a shared process configuration.
+// Only the claude CLI backend implements this today — codex's app-server is
+// a single long-lived process and can't reload its global AGENTS.md per
+// conversation (see docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md).
+type PersonaOverride struct {
+	// SettingSources restricts which claude settings sources load for this
+	// conversation (e.g. "project,local" to exclude the "user" source and
+	// therefore ~/.claude/CLAUDE.md). Empty means no restriction.
+	SettingSources string
+	// SystemPrompt is appended (via --append-system-prompt) after the
+	// agent's own configured system prompt. Empty means nothing is injected.
+	SystemPrompt string
+}
+
+// PersonaAwareAgent is implemented by agents that can inject a different
+// PersonaOverride per conversation. Callers should type-assert for it rather
+// than adding it to the base Agent interface, since ACP/HTTP agents have no
+// equivalent concept today.
+type PersonaAwareAgent interface {
+	Agent
+	SetPersonaOverride(conversationID string, override PersonaOverride)
+}
+
 // ImageInput holds image data for multimodal chat.
 type ImageInput struct {
 	MimeType string
