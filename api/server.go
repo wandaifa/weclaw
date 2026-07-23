@@ -15,19 +15,19 @@ import (
 )
 
 const (
-	AccountReloadPath    = "/api/internal/accounts/reload"
-	AccountsPath         = "/api/internal/accounts"
-	AccountStatePath     = "/api/internal/accounts/state"
-	AccountRemovePath    = "/api/internal/accounts/remove"
-	AccountsDeletedPath  = "/api/internal/accounts/deleted"
-	MessageMergePath     = "/api/internal/settings/message-merge"
-	MediaRetentionPath   = "/api/internal/settings/media-retention"
-	AccessModePath       = "/api/internal/settings/access-mode"
-	PermissionsPath      = "/api/internal/permissions"
-	PermissionsBlockPath = "/api/internal/permissions/block"
-	PermissionsUsagePath = "/api/internal/permissions/usage"
-	PersonasPath          = "/api/internal/personas"
-	PersonaDeletePath     = "/api/internal/personas/delete"
+	AccountReloadPath      = "/api/internal/accounts/reload"
+	AccountsPath           = "/api/internal/accounts"
+	AccountStatePath       = "/api/internal/accounts/state"
+	AccountRemovePath      = "/api/internal/accounts/remove"
+	AccountsDeletedPath    = "/api/internal/accounts/deleted"
+	MessageMergePath       = "/api/internal/settings/message-merge"
+	MediaRetentionPath     = "/api/internal/settings/media-retention"
+	AccessModePath         = "/api/internal/settings/access-mode"
+	PermissionsPath        = "/api/internal/permissions"
+	PermissionsBlockPath   = "/api/internal/permissions/block"
+	PermissionsUsagePath   = "/api/internal/permissions/usage"
+	PersonasPath           = "/api/internal/personas"
+	PersonaDeletePath      = "/api/internal/personas/delete"
 	PermissionsPersonaPath = "/api/internal/permissions/persona"
 )
 

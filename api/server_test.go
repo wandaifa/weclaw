@@ -498,4 +498,28 @@ func TestHandlePermissionsPersonaIsIndependentOfLevelSave(t *testing.T) {
 	if got := stored["someone@im.wechat"]; got.Persona != "vip" {
 		t.Fatalf("level save must not clear persona binding, got %+v", got)
 	}
+
+	// Saving new level/quota afterwards must not clear the persona binding.
+	save2 := httptest.NewRequest(http.MethodPost, PermissionsPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","level":"full_access","daily_limit":50}`))
+	save2.RemoteAddr = "127.0.0.1:12345"
+	save2Resp := httptest.NewRecorder()
+	server.handlePermissions(save2Resp, save2)
+	if save2Resp.Code != http.StatusOK {
+		t.Fatalf("second level save POST = %d %s", save2Resp.Code, save2Resp.Body.String())
+	}
+	if got := stored["someone@im.wechat"]; got.Persona != "vip" {
+		t.Fatalf("second level save must not clear persona binding, got %+v", got)
+	}
+
+	// Binding a new persona must not touch the level/quota that was set above.
+	bind2 := httptest.NewRequest(http.MethodPost, PermissionsPersonaPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","persona":"premium"}`))
+	bind2.RemoteAddr = "127.0.0.1:12345"
+	bind2Resp := httptest.NewRecorder()
+	server.handlePermissionsPersona(bind2Resp, bind2)
+	if bind2Resp.Code != http.StatusOK {
+		t.Fatalf("second bind POST = %d %s", bind2Resp.Code, bind2Resp.Body.String())
+	}
+	if got := stored["someone@im.wechat"]; got.Persona != "premium" || got.Level != "full_access" || got.DailyLimit != 50 {
+		t.Fatalf("second bind must preserve level/quota, got %+v", got)
+	}
 }
