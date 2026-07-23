@@ -16,22 +16,25 @@ import (
 	"github.com/fastclaw-ai/weclaw/agent"
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/fastclaw-ai/weclaw/persona"
 )
 
 func newTestHandler() *Handler {
 	return &Handler{
-		agents:      make(map[string]agent.Agent),
-		userAgents:  make(map[string]string),
-		permissions: make(map[string]config.UserPermission),
-		usage:       make(map[string]*dailyUsage),
+		agents:       make(map[string]agent.Agent),
+		userAgents:   make(map[string]string),
+		permissions:  make(map[string]config.UserPermission),
+		userPersonas: make(map[string]string),
+		usage:        make(map[string]*dailyUsage),
 	}
 }
 
 // recordingAgent is a minimal agent.Agent test double that records every
 // message it receives without doing any real work.
 type recordingAgent struct {
-	mu    sync.Mutex
-	calls []string
+	mu               sync.Mutex
+	calls            []string
+	personaOverrides map[string]agent.PersonaOverride
 }
 
 func (a *recordingAgent) Chat(_ context.Context, _ string, message string) (string, error) {
@@ -45,6 +48,22 @@ func (a *recordingAgent) Info() agent.AgentInfo {
 	return agent.AgentInfo{Name: "fake", Type: "fake", Model: "fake-model"}
 }
 func (a *recordingAgent) SetCwd(string) {}
+
+func (a *recordingAgent) SetPersonaOverride(conversationID string, override agent.PersonaOverride) {
+	a.mu.Lock()
+	if a.personaOverrides == nil {
+		a.personaOverrides = make(map[string]agent.PersonaOverride)
+	}
+	a.personaOverrides[conversationID] = override
+	a.mu.Unlock()
+}
+
+func (a *recordingAgent) personaOverrideFor(conversationID string) (agent.PersonaOverride, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	override, ok := a.personaOverrides[conversationID]
+	return override, ok
+}
 
 func (a *recordingAgent) callsSnapshot() []string {
 	a.mu.Lock()
@@ -852,4 +871,73 @@ func TestAccessGateDoesNotBlockOwnerRegardlessOfMode(t *testing.T) {
 	h.HandleMessage(context.Background(), client, newTestMessage(ownerID, "hello", 21))
 
 	waitFor(t, 4*time.Second, func() bool { return len(fake.callsSnapshot()) == 1 })
+}
+
+func TestPersonaOverrideResolutionPriority(t *testing.T) {
+	dir := t.TempDir()
+	if err := persona.Save(dir, persona.DefaultName, "默认人格"); err != nil {
+		t.Fatalf("persona.Save default: %v", err)
+	}
+	if err := persona.Save(dir, "vip", "VIP人格"); err != nil {
+		t.Fatalf("persona.Save vip: %v", err)
+	}
+
+	h := newTestHandler()
+	h.SetPersonaDir(dir)
+
+	// No binding -> default persona.
+	name, override := h.personaOverride("user-a")
+	if name != persona.DefaultName || override.SystemPrompt != "默认人格" {
+		t.Fatalf("unbound user got (%q, %q), want (%q, \"默认人格\")", name, override.SystemPrompt, persona.DefaultName)
+	}
+
+	// Explicit binding -> that persona.
+	h.SetUserPersona("user-b", "vip")
+	name, override = h.personaOverride("user-b")
+	if name != "vip" || override.SystemPrompt != "VIP人格" {
+		t.Fatalf("bound user got (%q, %q), want (\"vip\", \"VIP人格\")", name, override.SystemPrompt)
+	}
+
+	if override.SettingSources != "project,local" {
+		t.Fatalf("override.SettingSources = %q, want %q", override.SettingSources, "project,local")
+	}
+}
+
+func TestChatWithAgentInjectsPersonaOverrideForNonOwner(t *testing.T) {
+	dir := t.TempDir()
+	if err := persona.Save(dir, persona.DefaultName, "脱敏人格文本"); err != nil {
+		t.Fatalf("persona.Save: %v", err)
+	}
+
+	h := newTestHandler()
+	h.SetPersonaDir(dir)
+	fake := &recordingAgent{}
+
+	if _, _, err := h.chatWithAgent(context.Background(), fake, "non-owner-test@im.wechat", "hi"); err != nil {
+		t.Fatalf("chatWithAgent: %v", err)
+	}
+
+	override, ok := fake.personaOverrideFor("non-owner-test@im.wechat")
+	if !ok {
+		t.Fatal("expected a persona override to be recorded")
+	}
+	if override.SystemPrompt != "脱敏人格文本" {
+		t.Fatalf("override.SystemPrompt = %q, want %q", override.SystemPrompt, "脱敏人格文本")
+	}
+}
+
+func TestChatWithAgentSkipsPersonaOverrideForOwner(t *testing.T) {
+	dir := t.TempDir()
+	h := newTestHandler()
+	h.SetPersonaDir(dir)
+	fake := &recordingAgent{}
+
+	ownerID := config.OwnerUserIDs()[0]
+	if _, _, err := h.chatWithAgent(context.Background(), fake, ownerID, "hi"); err != nil {
+		t.Fatalf("chatWithAgent: %v", err)
+	}
+
+	if _, ok := fake.personaOverrideFor(ownerID); ok {
+		t.Fatal("owner conversations must not get a persona override")
+	}
 }

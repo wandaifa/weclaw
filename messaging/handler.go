@@ -15,6 +15,7 @@ import (
 	"github.com/fastclaw-ai/weclaw/agent"
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/fastclaw-ai/weclaw/persona"
 	"github.com/google/uuid"
 )
 
@@ -34,27 +35,30 @@ type AgentMeta struct {
 
 // Handler processes incoming WeChat messages and dispatches replies.
 type Handler struct {
-	mu            sync.RWMutex
-	defaultName   string
-	accessMode    config.AccessMode                // gates whether a non-owner reaches an agent at all
-	userAgents    map[string]string                // user ID -> selected agent; falls back to defaultName
-	permissions   map[string]config.UserPermission // user ID -> sandbox tier (non-owner only)
-	agents        map[string]agent.Agent           // name -> running agent
-	agentMetas    []AgentMeta                      // all configured agents (for /status)
-	agentWorkDirs map[string]string                // agent name -> configured/runtime cwd
-	customAliases map[string]string                // custom alias -> agent name (from config)
-	factory       AgentFactory
-	saveUserAgent SaveUserAgentFunc
-	contextTokens sync.Map // map[userID]contextToken
-	saveDir       string   // directory to save images/files to
-	seenMsgs      sync.Map // map[int64]time.Time — dedup by message_id
-	pendingMedia  sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
-	activeChats   sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
-	chatQueues    sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
-	mergeMu       sync.RWMutex
-	mergeSettings MergeSettings
-	usageMu       sync.Mutex
-	usage         map[string]*dailyUsage // user ID -> today's message count (non-owner only, in-memory)
+	mu             sync.RWMutex
+	defaultName    string
+	accessMode     config.AccessMode                // gates whether a non-owner reaches an agent at all
+	userAgents     map[string]string                // user ID -> selected agent; falls back to defaultName
+	permissions    map[string]config.UserPermission // user ID -> sandbox tier (non-owner only)
+	personaDir     string                           // ~/.weclaw/personas; empty disables persona injection
+	defaultPersona string                           // config.json default_persona; "" falls back to persona.DefaultName
+	userPersonas   map[string]string                // userID -> persona name (non-owner only)
+	agents         map[string]agent.Agent           // name -> running agent
+	agentMetas     []AgentMeta                      // all configured agents (for /status)
+	agentWorkDirs  map[string]string                // agent name -> configured/runtime cwd
+	customAliases  map[string]string                // custom alias -> agent name (from config)
+	factory        AgentFactory
+	saveUserAgent  SaveUserAgentFunc
+	contextTokens  sync.Map // map[userID]contextToken
+	saveDir        string   // directory to save images/files to
+	seenMsgs       sync.Map // map[int64]time.Time — dedup by message_id
+	pendingMedia   sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
+	activeChats    sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
+	chatQueues     sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
+	mergeMu        sync.RWMutex
+	mergeSettings  MergeSettings
+	usageMu        sync.Mutex
+	usage          map[string]*dailyUsage // user ID -> today's message count (non-owner only, in-memory)
 }
 
 // dailyUsage tracks one non-owner user's message count for the current local day.
@@ -107,6 +111,7 @@ func NewHandler(factory AgentFactory, saveUserAgent SaveUserAgentFunc) *Handler 
 		agents:        make(map[string]agent.Agent),
 		userAgents:    make(map[string]string),
 		permissions:   make(map[string]config.UserPermission),
+		userPersonas:  make(map[string]string),
 		agentWorkDirs: make(map[string]string),
 		factory:       factory,
 		saveUserAgent: saveUserAgent,
@@ -243,6 +248,71 @@ func (h *Handler) SetUserPermission(userID string, perm config.UserPermission) {
 	h.mu.Unlock()
 }
 
+// SetPersonaDir configures where persona text files live. Must be called
+// before any non-owner chat reaches chatWithAgent, or persona injection
+// falls back to persona.Load's built-in safe text (empty dir behaves the
+// same as a dir with no files).
+func (h *Handler) SetPersonaDir(dir string) {
+	h.mu.Lock()
+	h.personaDir = dir
+	h.mu.Unlock()
+}
+
+// SetDefaultPersona sets the persona non-owner users get when they have no
+// explicit binding in userPersonas.
+func (h *Handler) SetDefaultPersona(name string) {
+	h.mu.Lock()
+	h.defaultPersona = name
+	h.mu.Unlock()
+}
+
+// SetUserPersonas restores persisted non-owner persona bindings at startup.
+func (h *Handler) SetUserPersonas(bindings map[string]string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.userPersonas = make(map[string]string, len(bindings))
+	for userID, name := range bindings {
+		if userID != "" && name != "" {
+			h.userPersonas[userID] = name
+		}
+	}
+}
+
+// SetUserPersona updates one non-owner user's persona binding immediately
+// (called by the internal permissions API after saving to config). An empty
+// name clears the binding, falling back to defaultPersona.
+func (h *Handler) SetUserPersona(userID, name string) {
+	h.mu.Lock()
+	if name == "" {
+		delete(h.userPersonas, userID)
+	} else {
+		h.userPersonas[userID] = name
+	}
+	h.mu.Unlock()
+}
+
+// personaOverride resolves the agent.PersonaOverride for one non-owner
+// user's claude conversation: an explicit userPersonas binding wins, else
+// defaultPersona, else persona.DefaultName. personaName is returned
+// alongside for logging/snapshot purposes.
+func (h *Handler) personaOverride(userID string) (personaName string, override agent.PersonaOverride) {
+	h.mu.RLock()
+	dir := h.personaDir
+	name, bound := h.userPersonas[userID]
+	defaultName := h.defaultPersona
+	h.mu.RUnlock()
+
+	if !bound || name == "" {
+		name = defaultName
+	}
+	if name == "" {
+		name = persona.DefaultName
+	}
+
+	text := persona.Load(dir, name)
+	return name, agent.PersonaOverride{SettingSources: "project,local", SystemPrompt: text}
+}
+
 // SetAccessMode updates the gate deciding whether non-owner messages reach
 // an agent at all. Called at startup (restoring config) and by the internal
 // permissions API after saving a change.
@@ -295,6 +365,7 @@ type PermissionSnapshot struct {
 	Level      config.PermissionLevel
 	DailyLimit int
 	Blocked    bool
+	Persona    string // "" = using the default persona
 }
 
 // PermissionsSnapshot lists every non-owner user with an explicitly
@@ -308,7 +379,10 @@ func (h *Handler) PermissionsSnapshot() []PermissionSnapshot {
 	defer h.mu.RUnlock()
 	out := make([]PermissionSnapshot, 0, len(h.permissions))
 	for userID, perm := range h.permissions {
-		out = append(out, PermissionSnapshot{UserID: userID, Level: perm.Level, DailyLimit: perm.DailyLimit, Blocked: perm.Blocked})
+		out = append(out, PermissionSnapshot{
+			UserID: userID, Level: perm.Level, DailyLimit: perm.DailyLimit, Blocked: perm.Blocked,
+			Persona: h.userPersonas[userID],
+		})
 	}
 	return out
 }
@@ -1137,6 +1211,10 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string) (string, time.Duration, error) {
 	if pa, ok := ag.(agent.PolicyAwareAgent); ok {
 		pa.SetConversationPolicy(userID, h.conversationPolicy(userID))
+	}
+	if pa, ok := ag.(agent.PersonaAwareAgent); ok && !config.IsOwner(userID) {
+		_, override := h.personaOverride(userID)
+		pa.SetPersonaOverride(userID, override)
 	}
 
 	info := ag.Info()
