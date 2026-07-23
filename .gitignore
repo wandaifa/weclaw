@@ -24,3 +24,6 @@ Thumbs.db
 
 # Local git worktrees (superpowers using-git-worktrees fallback)
 .worktrees/
+
+# Superpowers subagent-driven-development progress ledger (scratch, not shipped)
+.superpowers/
