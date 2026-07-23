@@ -18,6 +18,7 @@ import (
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/fastclaw-ai/weclaw/persona"
 	"github.com/fastclaw-ai/weclaw/store"
 	"github.com/mdp/qrterminal/v3"
 	"github.com/spf13/cobra"
@@ -150,6 +151,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 			}
 		}
 	}()
+	personaDir, err := persona.Dir()
+	if err != nil {
+		return fmt.Errorf("resolve personas dir: %w", err)
+	}
+	if err := persona.EnsureDefault(personaDir); err != nil {
+		return fmt.Errorf("seed default persona: %w", err)
+	}
 	handler := messaging.NewHandler(
 		func(ctx context.Context, name string) agent.Agent {
 			return createAgentByName(ctx, cfg, name)
@@ -170,6 +178,9 @@ func runStart(cmd *cobra.Command, args []string) error {
 	handler.SetUserAgents(cfg.UserAgents)
 	handler.SetUserPermissions(cfg.UserPermissions)
 	handler.SetAccessMode(cfg.AccessMode)
+	handler.SetPersonaDir(personaDir)
+	handler.SetDefaultPersona(cfg.DefaultPersona)
+	handler.SetUserPersonas(cfg.UserPersonas)
 
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
@@ -304,6 +315,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 		for _, perm := range handler.PermissionsSnapshot() {
 			infos = append(infos, api.UserPermissionInfo{
 				UserID: perm.UserID, Level: string(perm.Level), DailyLimit: perm.DailyLimit, Blocked: perm.Blocked,
+				Persona: perm.Persona,
 			})
 		}
 		return infos
@@ -358,6 +370,52 @@ func runStart(cmd *cobra.Command, args []string) error {
 
 		handler.SetUserPermission(req.UserID, perm)
 		return api.UserPermissionInfo{UserID: req.UserID, Level: string(perm.Level), DailyLimit: perm.DailyLimit, Blocked: perm.Blocked}, nil
+	})
+	apiServer.SetPersonasProvider(func() ([]api.PersonaInfo, error) {
+		list, err := persona.List(personaDir)
+		if err != nil {
+			return nil, err
+		}
+		infos := make([]api.PersonaInfo, 0, len(list))
+		for _, p := range list {
+			infos = append(infos, api.PersonaInfo{Name: p.Name, Text: p.Text})
+		}
+		return infos, nil
+	})
+	apiServer.SetPersonaSaveController(func(_ context.Context, req api.PersonaSaveRequest) (api.PersonaInfo, error) {
+		if err := persona.Save(personaDir, req.Name, req.Text); err != nil {
+			return api.PersonaInfo{}, err
+		}
+		return api.PersonaInfo{Name: req.Name, Text: req.Text}, nil
+	})
+	apiServer.SetPersonaDeleteController(func(_ context.Context, req api.PersonaDeleteRequest) error {
+		return persona.Delete(personaDir, req.Name)
+	})
+	apiServer.SetPermissionPersonaController(func(_ context.Context, req api.PermissionPersonaRequest) (api.UserPermissionInfo, error) {
+		if config.IsOwner(req.UserID) {
+			return api.UserPermissionInfo{}, fmt.Errorf("cannot set persona for the owner")
+		}
+		configMu.Lock()
+		if cfg.UserPersonas == nil {
+			cfg.UserPersonas = make(map[string]string)
+		}
+		if req.Persona == "" {
+			delete(cfg.UserPersonas, req.UserID)
+		} else {
+			cfg.UserPersonas[req.UserID] = req.Persona
+		}
+		saveErr := config.Save(cfg)
+		existing := cfg.UserPermissions[req.UserID]
+		configMu.Unlock()
+		if saveErr != nil {
+			return api.UserPermissionInfo{}, saveErr
+		}
+
+		handler.SetUserPersona(req.UserID, req.Persona)
+		return api.UserPermissionInfo{
+			UserID: req.UserID, Level: string(existing.Level), DailyLimit: existing.DailyLimit,
+			Blocked: existing.Blocked, Persona: req.Persona,
+		}, nil
 	})
 	apiServer.SetUsageProvider(func() []api.UsageInfo {
 		entries := handler.UsageSnapshot()
