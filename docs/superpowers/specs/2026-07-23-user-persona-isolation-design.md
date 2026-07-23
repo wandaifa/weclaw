@@ -1,7 +1,15 @@
 # 按用户身份分离人格 + 脱敏（persona）设计
 
 日期：2026-07-23
-状态：已批准，待写实施计划
+状态：已批准，已实施；**2026-07-24 修正过一处关键机制错误，见下方勘误**
+
+## 勘误（2026-07-24）
+
+本文档下方所有 `--setting-sources project,local` 的描述**是错的**，已在实际代码里改成 `--safe-mode`（`PersonaOverride.SettingSources string` 字段也已改名为 `SafeMode bool`）。
+
+`--setting-sources` 管的是 `settings.json` 类配置文件来源（权限/hooks/环境变量），跟 `CLAUDE.md`/记忆加载是两套完全不同的机制——排除 `user` 来源根本不会排除 `~/.claude/CLAUDE.md`。这个错误一路通过了任务级 review 和全分支终审（当时终审还给出了"已对照官方文档验证"的说法，但没人真的拿一个真实 claude 进程测过实际回复内容），直到梁师傅亲自用非 owner 微信号测试，收到了完整的"晚秋"人设+隐私信息，才现场复现根因、改用 `--safe-mode`（实测验证：能让 claude CLI 彻底不做 CLAUDE.md 自动发现，同时不影响登录态/工具/权限）。
+
+详见 `agent/agent.go` 里 `PersonaOverride.SafeMode` 字段上的完整事故记录注释，以及 commit `7a01107`。
 
 ## 背景与问题
 
