@@ -793,23 +793,9 @@ git commit -m "Add default_persona/user_personas fields to config"
 - Consumes：`config.IsOwner(userID string) bool`（已存在）
 - Produces：`(*Handler).selectedAgent(userID string) (string, agent.Agent, bool)` 对非 owner 恒定返回 `("claude", ag, true)`
 
-- [ ] **Step 1: 改 `newTestHandler()` 补 `userPersonas` 初始化（为 Task 5 铺路，现在做不影响本任务）**
+> **注意（计划修正，2026-07-23）：** 这个任务原本的 Step 1 是「改 `newTestHandler()` 补 `userPersonas` 初始化」，标注"为 Task 5 铺路，现在做不影响本任务"——这个判断是错的：`Handler` struct 在 Task 4 执行时还没有 `userPersonas` 字段（那是 Task 5 Step 4 才加的），此时在 `newTestHandler()` 的结构体字面量里引用它会直接编译失败，报 `unknown field userPersonas in struct literal of type messaging.Handler`。已把这一步挪到 Task 5（见 Task 5 Step 1 的对应修正），Task 4 从下面的 Step 1（原 Step 2）开始。
 
-`messaging/handler_test.go` 里的 `newTestHandler()`：
-
-```go
-func newTestHandler() *Handler {
-	return &Handler{
-		agents:       make(map[string]agent.Agent),
-		userAgents:   make(map[string]string),
-		permissions:  make(map[string]config.UserPermission),
-		userPersonas: make(map[string]string),
-		usage:        make(map[string]*dailyUsage),
-	}
-}
-```
-
-- [ ] **Step 2: 改 `TestUserAgentSelectionsAreIndependent`（原测试断言的是即将删除的旧行为）**
+- [ ] **Step 1: 改 `TestUserAgentSelectionsAreIndependent`（原测试断言的是即将删除的旧行为）**
 
 把 `messaging/handler_test.go` 里的 `TestUserAgentSelectionsAreIndependent` 整个替换为两个测试：
 
@@ -848,18 +834,18 @@ func TestSelectedAgentHonorsOwnerUserAgentsOverride(t *testing.T) {
 }
 ```
 
-- [ ] **Step 3: 改另外三个原本假定非 owner 走 `codex` 的测试**
+- [ ] **Step 2: 改另外三个原本假定非 owner 走 `codex` 的测试**
 
 `TestNonOwnerAgentSwitchPrefixIsPlainText`（原第 528 行）、`TestNonOwnerCwdIsPlainText`（原第 547 行）、`TestQuotaExceededBlocksNonOwnerBeforeAgentCall`（原第 591 行）三处都有 `h.SetDefaultAgent("codex", fake)`，把这三处全部改成 `h.SetDefaultAgent("claude", fake)`（其余代码不动 —— 这三个测试原本验证的是「非 owner 的消息原样转发到他们唯一能用的 agent」，只是把注册的 fake 名字从 `"codex"` 换成 `"claude"`，跟新的强制路由对齐）。
 
 `TestAccessGateRefusesBeforeAgentCallInOwnerOnlyMode`（原第 764 行）和 `TestAccessGateDoesNotBlockOwnerRegardlessOfMode`（原第 824 行）不用改：前者断言 `fake.callsSnapshot()` 长度为 0（在 selectedAgent 之前就被 access gate 拦下了，跟 agent 名字无关），后者用的是 owner ID（owner 路径不受本次改动影响）。
 
-- [ ] **Step 4: 跑测试确认失败（还没改 selectedAgent 本体）**
+- [ ] **Step 3: 跑测试确认失败（还没改 selectedAgent 本体）**
 
 Run: `cd ~/AiCodeProject/weclaw && go test ./messaging/... -run 'TestSelectedAgent|TestNonOwnerAgentSwitchPrefixIsPlainText|TestNonOwnerCwdIsPlainText|TestQuotaExceededBlocksNonOwnerBeforeAgentCall' -v`
 Expected: `TestSelectedAgentIgnoresUserAgentsOverrideForNonOwner` FAIL（当前实现还是遵循 `userAgents`/`defaultName`）
 
-- [ ] **Step 5: 改 `selectedAgent` 本体**
+- [ ] **Step 4: 改 `selectedAgent` 本体**
 
 `messaging/handler.go` 里，紧挨着 `selectedAgent` 函数之前加一个常量，并替换函数体：
 
@@ -891,12 +877,12 @@ func (h *Handler) selectedAgent(userID string) (string, agent.Agent, bool) {
 }
 ```
 
-- [ ] **Step 6: 跑测试确认通过**
+- [ ] **Step 5: 跑测试确认通过**
 
 Run: `cd ~/AiCodeProject/weclaw && go test ./messaging/... -v`
 Expected: 全部 PASS
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 cd ~/AiCodeProject/weclaw
@@ -1065,6 +1051,20 @@ func NewHandler(factory AgentFactory, saveUserAgent SaveUserAgentFunc) *Handler 
 		saveUserAgent: saveUserAgent,
 		mergeSettings: DefaultMergeSettings(),
 		usage:         make(map[string]*dailyUsage),
+	}
+}
+```
+
+**（计划修正，2026-07-23）** 同时更新测试辅助函数 `newTestHandler()`（`messaging/handler_test.go`）——它是绕过 `NewHandler` 直接构造 `Handler{}` 字面量的测试专用辅助函数，不会自动获得上面 `NewHandler` 里加的初始化，必须单独补上，否则本任务下面 Step 2 里 `TestPersonaOverrideResolutionPriority` 调用的 `h.SetUserPersona(...)` 会往 nil map 写入直接 panic：
+
+```go
+func newTestHandler() *Handler {
+	return &Handler{
+		agents:       make(map[string]agent.Agent),
+		userAgents:   make(map[string]string),
+		permissions:  make(map[string]config.UserPermission),
+		userPersonas: make(map[string]string),
+		usage:        make(map[string]*dailyUsage),
 	}
 }
 ```
