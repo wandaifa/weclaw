@@ -339,13 +339,14 @@ func runStart(cmd *cobra.Command, args []string) error {
 		perm := config.UserPermission{Level: level, DailyLimit: req.DailyLimit, Blocked: blocked}
 		cfg.UserPermissions[req.UserID] = perm
 		saveErr := config.Save(cfg)
+		userPersona := cfg.UserPersonas[req.UserID]
 		configMu.Unlock()
 		if saveErr != nil {
 			return api.UserPermissionInfo{}, saveErr
 		}
 
 		handler.SetUserPermission(req.UserID, perm)
-		return api.UserPermissionInfo{UserID: req.UserID, Level: string(level), DailyLimit: req.DailyLimit, Blocked: blocked}, nil
+		return api.UserPermissionInfo{UserID: req.UserID, Level: string(level), DailyLimit: req.DailyLimit, Blocked: blocked, Persona: userPersona}, nil
 	})
 	apiServer.SetPermissionBlockController(func(_ context.Context, req api.PermissionBlockRequest) (api.UserPermissionInfo, error) {
 		if config.IsOwner(req.UserID) {

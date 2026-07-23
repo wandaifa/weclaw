@@ -26,6 +26,13 @@ type CLIAgent struct {
 	personas     map[string]PersonaOverride // conversationID -> persona override (claude only)
 }
 
+// var _ PersonaAwareAgent = (*CLIAgent)(nil) guards against a future change to
+// SetPersonaOverride's signature silently breaking interface satisfaction:
+// without this, the runtime type-assertion in messaging/handler.go's
+// chatWithAgent would just return false with no compile error, and the
+// non-owner persona-isolation guarantee would silently stop applying.
+var _ PersonaAwareAgent = (*CLIAgent)(nil)
+
 // CLIAgentConfig holds configuration for a CLI agent.
 type CLIAgentConfig struct {
 	Name         string            // agent name for logging, e.g. "claude", "codex"

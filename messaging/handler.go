@@ -464,6 +464,19 @@ func (h *Handler) getAgent(ctx context.Context, name string) (agent.Agent, error
 // process per turn and supports per-conversation persona injection via
 // agent.PersonaAwareAgent, so it's the only backend safe to expose to
 // non-owners. See docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md.
+//
+// Scope of the non-owner isolation guarantee: persona injection for claude
+// runs with --setting-sources project,local, which excludes claude's user
+// settings source (~/.claude/CLAUDE.md) but does NOT exclude the
+// project/local sources — claude still walks up from its cwd
+// (agent.defaultWorkspace(), today ~/.weclaw/workspace) looking for
+// CLAUDE.md/CLAUDE.local.md. That ancestry (~/.weclaw/workspace ->
+// ~/.weclaw -> home -> /Users -> /) currently has no such file anywhere in
+// it, which is why non-owner conversations don't leak owner-authored
+// project instructions today. That's an environmental fact, not something
+// this code checks or enforces: if anyone ever places a CLAUDE.md or
+// CLAUDE.local.md in or above that cwd, or if defaultWorkspace() changes,
+// this exclusion silently narrows with no error or warning.
 const nonOwnerAgentName = "claude"
 
 // selectedAgent returns the agent selected by this user, falling back to the
