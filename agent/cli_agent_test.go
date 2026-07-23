@@ -13,10 +13,10 @@ func TestBuildClaudeArgsOwnerNoOverride(t *testing.T) {
 	}
 }
 
-func TestBuildClaudeArgsNonOwnerOverrideExcludesUserSettings(t *testing.T) {
-	override := PersonaOverride{SettingSources: "project,local", SystemPrompt: "你是通用助手"}
+func TestBuildClaudeArgsNonOwnerOverrideEnablesSafeMode(t *testing.T) {
+	override := PersonaOverride{SafeMode: true, SystemPrompt: "你是通用助手"}
 	got := buildClaudeArgs("hi", "", "", nil, override, "", false)
-	want := []string{"-p", "hi", "--output-format", "stream-json", "--verbose", "--setting-sources", "project,local", "--append-system-prompt", "你是通用助手"}
+	want := []string{"-p", "hi", "--output-format", "stream-json", "--verbose", "--safe-mode", "--append-system-prompt", "你是通用助手"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildClaudeArgs() = %#v, want %#v", got, want)
 	}

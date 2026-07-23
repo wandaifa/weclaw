@@ -256,8 +256,8 @@ func buildClaudeArgs(message, model, systemPrompt string, extraArgs []string, ov
 	if model != "" {
 		args = append(args, "--model", model)
 	}
-	if override.SettingSources != "" {
-		args = append(args, "--setting-sources", override.SettingSources)
+	if override.SafeMode {
+		args = append(args, "--safe-mode")
 	}
 
 	combinedPrompt := systemPrompt

@@ -310,7 +310,7 @@ func (h *Handler) personaOverride(userID string) (personaName string, override a
 	}
 
 	text := persona.Load(dir, name)
-	return name, agent.PersonaOverride{SettingSources: "project,local", SystemPrompt: text}
+	return name, agent.PersonaOverride{SafeMode: true, SystemPrompt: text}
 }
 
 // SetAccessMode updates the gate deciding whether non-owner messages reach
@@ -466,17 +466,20 @@ func (h *Handler) getAgent(ctx context.Context, name string) (agent.Agent, error
 // non-owners. See docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md.
 //
 // Scope of the non-owner isolation guarantee: persona injection for claude
-// runs with --setting-sources project,local, which excludes claude's user
-// settings source (~/.claude/CLAUDE.md) but does NOT exclude the
-// project/local sources — claude still walks up from its cwd
-// (agent.defaultWorkspace(), today ~/.weclaw/workspace) looking for
-// CLAUDE.md/CLAUDE.local.md. That ancestry (~/.weclaw/workspace ->
-// ~/.weclaw -> home -> /Users -> /) currently has no such file anywhere in
-// it, which is why non-owner conversations don't leak owner-authored
-// project instructions today. That's an environmental fact, not something
-// this code checks or enforces: if anyone ever places a CLAUDE.md or
-// CLAUDE.local.md in or above that cwd, or if defaultWorkspace() changes,
-// this exclusion silently narrows with no error or warning.
+// runs with --safe-mode, which the claude CLI documents as disabling
+// CLAUDE.md auto-discovery entirely (all tiers — user, project, and local
+// — not just one), along with skills/plugins/hooks/custom commands/agents,
+// while leaving auth, model selection, built-in tools, and permissions
+// untouched. This was empirically verified by manually reproducing a real
+// leaked conversation on 2026-07-24: a prior version of this override used
+// --setting-sources project,local instead, on the mistaken assumption that
+// it also excludes CLAUDE.md — it does not (that flag only governs
+// settings.json-style config file sources, an unrelated mechanism from
+// CLAUDE.md/memory) — and a real non-owner WeChat conversation received
+// the owner's full private CLAUDE.md persona verbatim as a result. If this
+// mechanism is ever changed again, reproduce it against a real `claude`
+// process and read the actual reply before trusting it, the way this bug
+// was found — args-only unit tests cannot catch a wrong CLI flag.
 const nonOwnerAgentName = "claude"
 
 // selectedAgent returns the agent selected by this user, falling back to the

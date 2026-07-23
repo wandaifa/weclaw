@@ -898,8 +898,8 @@ func TestPersonaOverrideResolutionPriority(t *testing.T) {
 		t.Fatalf("bound user got (%q, %q), want (\"vip\", \"VIP人格\")", name, override.SystemPrompt)
 	}
 
-	if override.SettingSources != "project,local" {
-		t.Fatalf("override.SettingSources = %q, want %q", override.SettingSources, "project,local")
+	if !override.SafeMode {
+		t.Fatalf("override.SafeMode = %v, want true", override.SafeMode)
 	}
 
 	// Configured default persona tier: SetDefaultPersona -> unbound user picks up configured default.

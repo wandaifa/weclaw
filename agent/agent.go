@@ -132,10 +132,27 @@ type PolicyAwareAgent interface {
 // a single long-lived process and can't reload its global AGENTS.md per
 // conversation (see docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md).
 type PersonaOverride struct {
-	// SettingSources restricts which claude settings sources load for this
-	// conversation (e.g. "project,local" to exclude the "user" source and
-	// therefore ~/.claude/CLAUDE.md). Empty means no restriction.
-	SettingSources string
+	// SafeMode, when true, passes --safe-mode to the claude CLI. This is
+	// what actually excludes CLAUDE.md (and skills/plugins/hooks/custom
+	// commands/agents) for the conversation while leaving auth, model
+	// selection, built-in tools, and permissions untouched.
+	//
+	// CORRECTED 2026-07-24: this field used to be "SettingSources string"
+	// passed as --setting-sources project,local, on the assumption that
+	// excluding claude's "user" settings source would exclude
+	// ~/.claude/CLAUDE.md. That assumption was wrong and went undetected
+	// through code review and all automated tests because nothing in this
+	// codebase actually spawns a real claude process to check the reply —
+	// --setting-sources governs settings.json-style config file sources
+	// (permissions/hooks/env), a mechanism entirely separate from
+	// CLAUDE.md/memory loading. This was only caught because the owner
+	// personally tested a real non-owner conversation and got a reply
+	// containing their private CLAUDE.md persona verbatim. Confirmed via
+	// manual reproduction (`claude -p ... --setting-sources project,local`
+	// still returns the full private persona; `claude -p ... --safe-mode`
+	// does not) before writing this fix — see final review's Important
+	// finding #1 for the design-time concern this replaces.
+	SafeMode bool
 	// SystemPrompt is appended (via --append-system-prompt) after the
 	// agent's own configured system prompt. Empty means nothing is injected.
 	SystemPrompt string
