@@ -228,3 +228,44 @@ func TestIsOwner(t *testing.T) {
 		t.Fatalf("OwnerUserIDs() len = %d, want 1", len(OwnerUserIDs()))
 	}
 }
+
+func TestConfigUserPersonasRoundTrip(t *testing.T) {
+	cfg := Config{
+		DefaultPersona: "default",
+		UserPersonas: map[string]string{
+			"someone@im.wechat": "vip",
+		},
+		Agents: map[string]AgentConfig{},
+	}
+
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+
+	var decoded Config
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("round-trip unmarshal: %v", err)
+	}
+
+	if decoded.DefaultPersona != "default" {
+		t.Fatalf("DefaultPersona = %q, want %q", decoded.DefaultPersona, "default")
+	}
+	if decoded.UserPersonas["someone@im.wechat"] != "vip" {
+		t.Fatalf("UserPersonas[someone] = %q, want %q", decoded.UserPersonas["someone@im.wechat"], "vip")
+	}
+}
+
+func TestConfigWithoutPersonaFieldsStillLoads(t *testing.T) {
+	var cfg Config
+	data := []byte(`{"agents":{}}`)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal config: %v", err)
+	}
+	if cfg.DefaultPersona != "" {
+		t.Fatalf("DefaultPersona = %q, want empty for legacy config", cfg.DefaultPersona)
+	}
+	if cfg.UserPersonas != nil {
+		t.Fatalf("UserPersonas = %#v, want nil before Load() normalizes it", cfg.UserPersonas)
+	}
+}

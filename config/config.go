@@ -14,6 +14,8 @@ type Config struct {
 	AccessMode      AccessMode                `json:"access_mode,omitempty"`
 	UserAgents      map[string]string         `json:"user_agents,omitempty"`
 	UserPermissions map[string]UserPermission `json:"user_permissions,omitempty"`
+	DefaultPersona  string                    `json:"default_persona,omitempty"`
+	UserPersonas    map[string]string         `json:"user_personas,omitempty"` // userID -> persona name
 	APIAddr         string                    `json:"api_addr,omitempty"`
 	SaveDir         string                    `json:"save_dir,omitempty"`
 	MessageMerge    MessageMergeConfig        `json:"message_merge,omitempty"`
@@ -196,6 +198,7 @@ func DefaultConfig() *Config {
 	return &Config{
 		UserAgents:      make(map[string]string),
 		UserPermissions: make(map[string]UserPermission),
+		UserPersonas:    make(map[string]string),
 		Agents:          make(map[string]AgentConfig),
 	}
 }
@@ -238,6 +241,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.UserPermissions == nil {
 		cfg.UserPermissions = make(map[string]UserPermission)
+	}
+	if cfg.UserPersonas == nil {
+		cfg.UserPersonas = make(map[string]string)
 	}
 
 	loadEnv(cfg)
