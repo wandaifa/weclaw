@@ -384,10 +384,25 @@ func (h *Handler) getAgent(ctx context.Context, name string) (agent.Agent, error
 	return ag, nil
 }
 
-// selectedAgent returns the agent selected by this user, falling back to the global default.
+// nonOwnerAgentName is the only agent non-owner users are ever routed to.
+// codex is a single long-lived process shared by every conversation, so it
+// can't apply a different persona/config per user; claude spawns a fresh
+// process per turn and supports per-conversation persona injection via
+// agent.PersonaAwareAgent, so it's the only backend safe to expose to
+// non-owners. See docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md.
+const nonOwnerAgentName = "claude"
+
+// selectedAgent returns the agent selected by this user, falling back to the
+// global default. Non-owner users always get nonOwnerAgentName regardless of
+// defaultName or any userAgents override — see nonOwnerAgentName's comment.
+// selected is always true for non-owner so a not-yet-running claude agent
+// still gets lazily started by callers' "ag == nil && selected" fallback.
 func (h *Handler) selectedAgent(userID string) (string, agent.Agent, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
+	if !config.IsOwner(userID) {
+		return nonOwnerAgentName, h.agents[nonOwnerAgentName], true
+	}
 	name, selected := h.userAgents[userID]
 	if !selected {
 		name = h.defaultName

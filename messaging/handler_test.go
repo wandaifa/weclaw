@@ -365,7 +365,7 @@ func TestAgentFailureReplyClassifiesClaudeErrors(t *testing.T) {
 	}
 }
 
-func TestUserAgentSelectionsAreIndependent(t *testing.T) {
+func TestSelectedAgentIgnoresUserAgentsOverrideForNonOwner(t *testing.T) {
 	h := newTestHandler()
 	h.defaultName = "codex"
 	h.SetUserAgents(map[string]string{
@@ -373,14 +373,28 @@ func TestUserAgentSelectionsAreIndependent(t *testing.T) {
 		"user-2": "codex",
 	})
 
+	// Non-owner users are always routed to claude — see nonOwnerAgentName's
+	// comment on selectedAgent — regardless of any userAgents override or
+	// the configured default agent.
 	if name, _, selected := h.selectedAgent("user-1"); name != "claude" || !selected {
 		t.Fatalf("user-1 selection = %q, selected=%v; want claude, true", name, selected)
 	}
-	if name, _, selected := h.selectedAgent("user-2"); name != "codex" || !selected {
-		t.Fatalf("user-2 selection = %q, selected=%v; want codex, true", name, selected)
+	if name, _, selected := h.selectedAgent("user-2"); name != "claude" || !selected {
+		t.Fatalf("user-2 selection = %q, selected=%v; want claude, true (override ignored for non-owner)", name, selected)
 	}
-	if name, _, selected := h.selectedAgent("user-3"); name != "codex" || selected {
-		t.Fatalf("user-3 selection = %q, selected=%v; want codex fallback, false", name, selected)
+	if name, _, selected := h.selectedAgent("user-3"); name != "claude" || !selected {
+		t.Fatalf("user-3 selection = %q, selected=%v; want claude fallback, true", name, selected)
+	}
+}
+
+func TestSelectedAgentHonorsOwnerUserAgentsOverride(t *testing.T) {
+	h := newTestHandler()
+	h.defaultName = "codex"
+	ownerID := config.OwnerUserIDs()[0]
+	h.SetUserAgents(map[string]string{ownerID: "claude"})
+
+	if name, _, selected := h.selectedAgent(ownerID); name != "claude" || !selected {
+		t.Fatalf("owner selection = %q, selected=%v; want claude, true", name, selected)
 	}
 }
 
@@ -531,7 +545,7 @@ func TestNonOwnerAgentSwitchPrefixIsPlainText(t *testing.T) {
 
 	h := NewHandler(nil, nil)
 	fake := &recordingAgent{}
-	h.SetDefaultAgent("codex", fake)
+	h.SetDefaultAgent("claude", fake)
 
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 	msg := newTestMessage("non-owner-test@im.wechat", "/codex hello", 1)
@@ -550,7 +564,7 @@ func TestNonOwnerCwdIsPlainText(t *testing.T) {
 
 	h := NewHandler(nil, nil)
 	fake := &recordingAgent{}
-	h.SetDefaultAgent("codex", fake)
+	h.SetDefaultAgent("claude", fake)
 	h.SetAgentWorkDirs(map[string]string{"codex": "/original/cwd"})
 
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
@@ -594,7 +608,7 @@ func TestQuotaExceededBlocksNonOwnerBeforeAgentCall(t *testing.T) {
 
 	h := NewHandler(nil, nil)
 	fake := &recordingAgent{}
-	h.SetDefaultAgent("codex", fake)
+	h.SetDefaultAgent("claude", fake)
 	h.SetUserPermission("quota-test@im.wechat", config.UserPermission{Level: config.PermissionReadOnly, DailyLimit: 1})
 	// Plain text without a "/" or "@" prefix is subject to the consecutive-message
 	// merge wait; use the minimum allowed idle delay so the test doesn't sit
