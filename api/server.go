@@ -26,6 +26,9 @@ const (
 	PermissionsPath      = "/api/internal/permissions"
 	PermissionsBlockPath = "/api/internal/permissions/block"
 	PermissionsUsagePath = "/api/internal/permissions/usage"
+	PersonasPath          = "/api/internal/personas"
+	PersonaDeletePath     = "/api/internal/personas/delete"
+	PermissionsPersonaPath = "/api/internal/permissions/persona"
 )
 
 // AccountReloadResult describes the accounts active after a reload.
@@ -101,6 +104,9 @@ type UserPermissionInfo struct {
 	// PermissionsBlockPath, never through the level/quota save below, so
 	// the two actions can't clobber each other.
 	Blocked bool `json:"blocked"`
+	// Persona is the explicitly bound persona name, or "" if this user is
+	// using the default persona. Owners never have one (always full access).
+	Persona string `json:"persona,omitempty"`
 }
 
 // PermissionsProvider lists every non-owner user seen so far with their
@@ -141,6 +147,46 @@ type UsageInfo struct {
 // UsageProvider returns today's quota usage snapshot for the internal API.
 type UsageProvider func() []UsageInfo
 
+// PersonaInfo describes one stored persona for the internal personas API.
+type PersonaInfo struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+}
+
+// PersonasProvider lists every stored persona.
+type PersonasProvider func() ([]PersonaInfo, error)
+
+// PersonaSaveRequest is the JSON body for POST /api/internal/personas.
+type PersonaSaveRequest struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+}
+
+// PersonaSaveController creates or updates one persona's text.
+type PersonaSaveController func(context.Context, PersonaSaveRequest) (PersonaInfo, error)
+
+// PersonaDeleteRequest is the JSON body for POST /api/internal/personas/delete.
+type PersonaDeleteRequest struct {
+	Name string `json:"name"`
+}
+
+// PersonaDeleteController removes one persona. Deleting "default" is
+// rejected by the underlying persona package.
+type PersonaDeleteController func(context.Context, PersonaDeleteRequest) error
+
+// PermissionPersonaRequest is the JSON body for POST
+// /api/internal/permissions/persona. A separate endpoint from
+// PermissionSetRequest for the same reason Blocked has its own endpoint:
+// binding a persona and saving a sandbox tier must never clobber each other.
+type PermissionPersonaRequest struct {
+	UserID  string `json:"user_id"`
+	Persona string `json:"persona"` // empty = clear the binding, fall back to the default persona
+}
+
+// PermissionPersonaController persists and immediately applies one user's
+// persona binding, leaving Level/DailyLimit/Blocked untouched.
+type PermissionPersonaController func(context.Context, PermissionPersonaRequest) (UserPermissionInfo, error)
+
 // Server provides an HTTP API for sending messages.
 type Server struct {
 	mu                sync.RWMutex
@@ -160,6 +206,10 @@ type Server struct {
 	setPermission     PermissionController
 	blockPermission   PermissionBlockController
 	usage             UsageProvider
+	personas          PersonasProvider
+	savePersona       PersonaSaveController
+	deletePersona     PersonaDeleteController
+	setPersonaBinding PermissionPersonaController
 	addr              string
 }
 
@@ -273,6 +323,34 @@ func (s *Server) SetUsageProvider(provider UsageProvider) {
 	s.usage = provider
 }
 
+// SetPersonasProvider exposes the list of stored personas through the loopback-only endpoint.
+func (s *Server) SetPersonasProvider(provider PersonasProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.personas = provider
+}
+
+// SetPersonaSaveController enables creating/updating a persona through the loopback API.
+func (s *Server) SetPersonaSaveController(controller PersonaSaveController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.savePersona = controller
+}
+
+// SetPersonaDeleteController enables deleting a persona through the loopback API.
+func (s *Server) SetPersonaDeleteController(controller PersonaDeleteController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deletePersona = controller
+}
+
+// SetPermissionPersonaController enables binding a user to a persona through the loopback API.
+func (s *Server) SetPermissionPersonaController(controller PermissionPersonaController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setPersonaBinding = controller
+}
+
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
 	BotID    string `json:"bot_id,omitempty"`
@@ -297,6 +375,9 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(PermissionsPath, s.handlePermissions)
 	mux.HandleFunc(PermissionsBlockPath, s.handlePermissionsBlock)
 	mux.HandleFunc(PermissionsUsagePath, s.handlePermissionsUsage)
+	mux.HandleFunc(PersonasPath, s.handlePersonas)
+	mux.HandleFunc(PersonaDeletePath, s.handlePersonaDelete)
+	mux.HandleFunc(PermissionsPersonaPath, s.handlePermissionsPersona)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -765,6 +846,110 @@ func (s *Server) handlePermissionsUsage(w http.ResponseWriter, r *http.Request) 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string][]UsageInfo{"usage": provider()})
+}
+
+func (s *Server) handlePersonas(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider, controller := s.personas, s.savePersona
+	s.mu.RUnlock()
+
+	if r.Method == http.MethodGet {
+		if provider == nil {
+			http.Error(w, "personas are unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		list, err := provider()
+		if err != nil {
+			http.Error(w, "failed to list personas: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string][]PersonaInfo{"personas": list})
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if controller == nil {
+		http.Error(w, "personas are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req PersonaSaveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	info, err := controller(r.Context(), req)
+	if err != nil {
+		http.Error(w, "invalid persona save: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
+}
+
+func (s *Server) handlePersonaDelete(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	controller := s.deletePersona
+	s.mu.RUnlock()
+	if controller == nil {
+		http.Error(w, "personas are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req PersonaDeleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	if err := controller(r.Context(), req); err != nil {
+		http.Error(w, "invalid persona delete: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+}
+
+func (s *Server) handlePermissionsPersona(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	controller := s.setPersonaBinding
+	s.mu.RUnlock()
+	if controller == nil {
+		http.Error(w, "permissions are unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req PermissionPersonaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.UserID == "" {
+		http.Error(w, "user_id is required", http.StatusBadRequest)
+		return
+	}
+	updated, err := controller(r.Context(), req)
+	if err != nil {
+		http.Error(w, "invalid persona binding: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
 }
 
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {

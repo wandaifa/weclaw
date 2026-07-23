@@ -409,3 +409,93 @@ func TestHandlePermissionsUsageReturnsSnapshot(t *testing.T) {
 		t.Fatalf("status = %d body = %s", resp.Code, resp.Body.String())
 	}
 }
+
+func TestHandlePersonasListsAndSaves(t *testing.T) {
+	stored := map[string]PersonaInfo{"default": {Name: "default", Text: "通用助手"}}
+	server := NewServer(nil, "")
+	server.SetPersonasProvider(func() ([]PersonaInfo, error) {
+		out := make([]PersonaInfo, 0, len(stored))
+		for _, v := range stored {
+			out = append(out, v)
+		}
+		return out, nil
+	})
+	server.SetPersonaSaveController(func(_ context.Context, req PersonaSaveRequest) (PersonaInfo, error) {
+		info := PersonaInfo{Name: req.Name, Text: req.Text}
+		stored[req.Name] = info
+		return info, nil
+	})
+
+	get := httptest.NewRequest(http.MethodGet, PersonasPath, nil)
+	get.RemoteAddr = "127.0.0.1:12345"
+	getResp := httptest.NewRecorder()
+	server.handlePersonas(getResp, get)
+	if getResp.Code != http.StatusOK || !strings.Contains(getResp.Body.String(), "通用助手") {
+		t.Fatalf("GET = %d %s", getResp.Code, getResp.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, PersonasPath, bytes.NewBufferString(`{"name":"vip","text":"VIP 人格"}`))
+	post.RemoteAddr = "127.0.0.1:12345"
+	postResp := httptest.NewRecorder()
+	server.handlePersonas(postResp, post)
+	if postResp.Code != http.StatusOK {
+		t.Fatalf("POST = %d %s", postResp.Code, postResp.Body.String())
+	}
+	if got := stored["vip"]; got.Text != "VIP 人格" {
+		t.Fatalf("stored persona = %+v", got)
+	}
+}
+
+func TestHandlePersonaDeleteRejectsDefault(t *testing.T) {
+	server := NewServer(nil, "")
+	server.SetPersonaDeleteController(func(_ context.Context, req PersonaDeleteRequest) error {
+		if req.Name == "default" {
+			return fmt.Errorf("cannot delete the %q persona", "default")
+		}
+		return nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, PersonaDeletePath, bytes.NewBufferString(`{"name":"default"}`))
+	req.RemoteAddr = "127.0.0.1:12345"
+	resp := httptest.NewRecorder()
+	server.handlePersonaDelete(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.Code)
+	}
+}
+
+func TestHandlePermissionsPersonaIsIndependentOfLevelSave(t *testing.T) {
+	stored := map[string]UserPermissionInfo{}
+	server := NewServer(nil, "")
+	server.SetPermissionController(func(_ context.Context, req PermissionSetRequest) (UserPermissionInfo, error) {
+		info := UserPermissionInfo{UserID: req.UserID, Level: req.Level, DailyLimit: req.DailyLimit, Persona: stored[req.UserID].Persona}
+		stored[req.UserID] = info
+		return info, nil
+	})
+	server.SetPermissionPersonaController(func(_ context.Context, req PermissionPersonaRequest) (UserPermissionInfo, error) {
+		info := stored[req.UserID]
+		info.UserID = req.UserID
+		info.Persona = req.Persona
+		stored[req.UserID] = info
+		return info, nil
+	})
+
+	bind := httptest.NewRequest(http.MethodPost, PermissionsPersonaPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","persona":"vip"}`))
+	bind.RemoteAddr = "127.0.0.1:12345"
+	bindResp := httptest.NewRecorder()
+	server.handlePermissionsPersona(bindResp, bind)
+	if bindResp.Code != http.StatusOK || !strings.Contains(bindResp.Body.String(), "vip") {
+		t.Fatalf("bind POST = %d %s", bindResp.Code, bindResp.Body.String())
+	}
+
+	save := httptest.NewRequest(http.MethodPost, PermissionsPath, bytes.NewBufferString(`{"user_id":"someone@im.wechat","level":"workspace_write","daily_limit":30}`))
+	save.RemoteAddr = "127.0.0.1:12345"
+	saveResp := httptest.NewRecorder()
+	server.handlePermissions(saveResp, save)
+	if saveResp.Code != http.StatusOK {
+		t.Fatalf("level save POST = %d %s", saveResp.Code, saveResp.Body.String())
+	}
+	if got := stored["someone@im.wechat"]; got.Persona != "vip" {
+		t.Fatalf("level save must not clear persona binding, got %+v", got)
+	}
+}
