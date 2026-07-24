@@ -239,7 +239,7 @@ func TestAppendNewCodexGeneratedImages(t *testing.T) {
 	if err := os.WriteFile(oldPath, []byte("old"), 0o644); err != nil {
 		t.Fatalf("write old image: %v", err)
 	}
-	existing := snapshotCodexGeneratedImages(threadID)
+	existing := snapshotCodexGeneratedImages(home, threadID)
 
 	newPath := filepath.Join(imageDir, "new.png")
 	if err := os.WriteFile(newPath, []byte("new"), 0o644); err != nil {
@@ -249,11 +249,52 @@ func TestAppendNewCodexGeneratedImages(t *testing.T) {
 		t.Fatalf("write text file: %v", err)
 	}
 
-	got := appendNewCodexGeneratedImages("reply", threadID, existing)
+	got := appendNewCodexGeneratedImages("reply", home, threadID, existing)
 	if !strings.Contains(got, "reply\n"+newPath) {
 		t.Fatalf("expected reply to include new image path, got %q", got)
 	}
 	if strings.Contains(got, oldPath) {
 		t.Fatalf("expected old image path to be skipped, got %q", got)
+	}
+}
+
+func TestCodexHomeUsesEnvOverrideWhenSet(t *testing.T) {
+	a := NewACPAgent(ACPAgentConfig{Command: "codex", Env: map[string]string{"CODEX_HOME": "/tmp/isolated-codex-home"}})
+	if got := a.codexHome(); got != "/tmp/isolated-codex-home" {
+		t.Fatalf("codexHome() = %q, want %q", got, "/tmp/isolated-codex-home")
+	}
+}
+
+func TestCodexHomeFallsBackToRealHomeWhenUnset(t *testing.T) {
+	a := NewACPAgent(ACPAgentConfig{Command: "codex"})
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("cannot determine real home dir in this environment")
+	}
+	if got := a.codexHome(); got != realHome {
+		t.Fatalf("codexHome() = %q, want real home %q", got, realHome)
+	}
+}
+
+func TestCodexGeneratedImagePathsUsesGivenHomeNotRealHome(t *testing.T) {
+	dir := t.TempDir()
+	imgDir := filepath.Join(dir, ".codex", "generated_images", "thread-x")
+	if err := os.MkdirAll(imgDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	imgPath := filepath.Join(imgDir, "pic.png")
+	if err := os.WriteFile(imgPath, []byte("fake-png"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got := codexGeneratedImagePaths(dir, "thread-x")
+	if len(got) != 1 || got[0] != imgPath {
+		t.Fatalf("codexGeneratedImagePaths(%q, thread-x) = %v, want [%q]", dir, got, imgPath)
+	}
+
+	// A different home must not see it.
+	otherDir := t.TempDir()
+	if got := codexGeneratedImagePaths(otherDir, "thread-x"); len(got) != 0 {
+		t.Fatalf("codexGeneratedImagePaths(otherHome, thread-x) = %v, want empty", got)
 	}
 }

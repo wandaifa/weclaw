@@ -344,6 +344,21 @@ func (a *ACPAgent) SetCwd(cwd string) {
 	a.cwd = cwd
 }
 
+// codexHome returns the CODEX_HOME this agent instance actually runs with:
+// the env override if the agent config set one (e.g. codex-shared's
+// isolated home), otherwise the real OS home directory (owner's real
+// codex instance, which has no CODEX_HOME override).
+func (a *ACPAgent) codexHome() string {
+	if home := a.env["CODEX_HOME"]; home != "" {
+		return home
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return home
+}
+
 // SetConversationPolicy records the sandbox tier for one conversationID.
 // codex ties sandbox/cwd to a thread at creation time, so a policy change
 // invalidates the cached thread/session for that conversation to force a
@@ -800,7 +815,7 @@ func (a *ACPAgent) chatCodexAppServerWithInput(ctx context.Context, conversation
 	} else {
 		log.Printf("[acp] reusing thread (pid=%d, thread=%s, conversation=%s)", pid, threadID, conversationID)
 	}
-	existingGeneratedImages := snapshotCodexGeneratedImages(threadID)
+	existingGeneratedImages := snapshotCodexGeneratedImages(a.codexHome(), threadID)
 
 	// Register turn event channel
 	turnCh := make(chan *codexTurnEvent, 256)
@@ -854,7 +869,7 @@ func (a *ACPAgent) chatCodexAppServerWithInput(ctx context.Context, conversation
 			}
 			if evt.Kind == "completed" {
 				result := strings.TrimSpace(strings.Join(textParts, ""))
-				result = appendNewCodexGeneratedImages(result, threadID, existingGeneratedImages)
+				result = appendNewCodexGeneratedImages(result, a.codexHome(), threadID, existingGeneratedImages)
 				if result == "" {
 					return "", fmt.Errorf("agent returned empty response")
 				}
@@ -864,8 +879,8 @@ func (a *ACPAgent) chatCodexAppServerWithInput(ctx context.Context, conversation
 	}
 }
 
-func snapshotCodexGeneratedImages(threadID string) map[string]struct{} {
-	paths := codexGeneratedImagePaths(threadID)
+func snapshotCodexGeneratedImages(home, threadID string) map[string]struct{} {
+	paths := codexGeneratedImagePaths(home, threadID)
 	seen := make(map[string]struct{}, len(paths))
 	for _, path := range paths {
 		seen[path] = struct{}{}
@@ -873,9 +888,9 @@ func snapshotCodexGeneratedImages(threadID string) map[string]struct{} {
 	return seen
 }
 
-func appendNewCodexGeneratedImages(reply, threadID string, existing map[string]struct{}) string {
+func appendNewCodexGeneratedImages(reply, home, threadID string, existing map[string]struct{}) string {
 	var newPaths []string
-	for _, path := range codexGeneratedImagePaths(threadID) {
+	for _, path := range codexGeneratedImagePaths(home, threadID) {
 		if _, ok := existing[path]; ok {
 			continue
 		}
@@ -890,12 +905,8 @@ func appendNewCodexGeneratedImages(reply, threadID string, existing map[string]s
 	return strings.TrimSpace(reply) + "\n" + strings.Join(newPaths, "\n")
 }
 
-func codexGeneratedImagePaths(threadID string) []string {
-	if threadID == "" {
-		return nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
+func codexGeneratedImagePaths(home, threadID string) []string {
+	if threadID == "" || home == "" {
 		return nil
 	}
 	root := filepath.Join(home, ".codex", "generated_images", threadID)
