@@ -203,6 +203,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
 	workDirs := make(map[string]string, len(cfg.Agents))
+	codexHomes := make(map[string]string, len(cfg.Agents))
 	for name, agCfg := range cfg.Agents {
 		command := agCfg.Command
 		if agCfg.Type == "http" {
@@ -217,9 +218,15 @@ func runStart(cmd *cobra.Command, args []string) error {
 		if agCfg.Cwd != "" {
 			workDirs[name] = agCfg.Cwd
 		}
+		if agCfg.Type == "acp" {
+			if home := agCfg.Env["CODEX_HOME"]; home != "" {
+				codexHomes[name] = home
+			}
+		}
 	}
 	handler.SetAgentMetas(metas)
 	handler.SetAgentWorkDirs(workDirs)
+	handler.SetAgentCodexHomes(codexHomes)
 
 	// Load custom aliases from agent configs
 	handler.SetCustomAliases(config.BuildAliasMap(cfg.Agents))

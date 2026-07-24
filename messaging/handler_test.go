@@ -1055,3 +1055,42 @@ func TestOwnerCodexCommandStillResolvesToRealCodex(t *testing.T) {
 		t.Fatalf("owner /codex should still reach the real codex agent, got %v", calls)
 	}
 }
+
+// TestAllowedAttachmentRootsIncludesPerAgentCodexHome guards against a real
+// production bug found via live smoke test: codex-shared's generated images
+// live under its own isolated CODEX_HOME (not the real OS home), so the
+// attachment allowlist must include that agent-specific root or every
+// generated image gets silently rejected as "outside allowed roots" even
+// though agent/acp_agent.go correctly found and reported the file.
+func TestAllowedAttachmentRootsIncludesPerAgentCodexHome(t *testing.T) {
+	h := NewHandler(nil, nil)
+	isolatedHome := filepath.Join(t.TempDir(), "codex-shared-home")
+	h.SetAgentCodexHomes(map[string]string{"codex-shared": isolatedHome})
+
+	roots := h.allowedAttachmentRoots("codex-shared")
+
+	imageDir := filepath.Join(isolatedHome, "generated_images", "thread-1")
+	if err := os.MkdirAll(imageDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	imagePath := filepath.Join(imageDir, "pic.png")
+	if err := os.WriteFile(imagePath, []byte("png"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	if !isAllowedAttachmentPath(imagePath, roots) {
+		t.Fatalf("codex-shared's own generated image at %s must be allowed, roots=%v", imagePath, roots)
+	}
+}
+
+func TestAllowedAttachmentRootsOmitsCodexHomeForAgentsWithoutOverride(t *testing.T) {
+	h := NewHandler(nil, nil)
+	h.SetAgentCodexHomes(map[string]string{"codex-shared": t.TempDir()})
+
+	roots := h.allowedAttachmentRoots("codex") // the real, owner-only agent has no override
+	for _, root := range roots {
+		if strings.Contains(root, "codex-shared") {
+			t.Fatalf("real codex agent's allowed roots must not include codex-shared's home, got %v", roots)
+		}
+	}
+}

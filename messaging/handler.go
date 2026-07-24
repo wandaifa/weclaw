@@ -48,6 +48,7 @@ type Handler struct {
 	agents              map[string]agent.Agent           // name -> running agent
 	agentMetas          []AgentMeta                      // all configured agents (for /status)
 	agentWorkDirs       map[string]string                // agent name -> configured/runtime cwd
+	agentCodexHomes     map[string]string                // agent name -> CODEX_HOME (acp agents with an env override, e.g. codex-shared)
 	customAliases       map[string]string                // custom alias -> agent name (from config)
 	factory             AgentFactory
 	saveUserAgent       SaveUserAgentFunc
@@ -110,15 +111,16 @@ type chatJob struct {
 // NewHandler creates a new message handler.
 func NewHandler(factory AgentFactory, saveUserAgent SaveUserAgentFunc) *Handler {
 	return &Handler{
-		agents:        make(map[string]agent.Agent),
-		userAgents:    make(map[string]string),
-		permissions:   make(map[string]config.UserPermission),
-		userPersonas:  make(map[string]string),
-		agentWorkDirs: make(map[string]string),
-		factory:       factory,
-		saveUserAgent: saveUserAgent,
-		mergeSettings: DefaultMergeSettings(),
-		usage:         make(map[string]*dailyUsage),
+		agents:          make(map[string]agent.Agent),
+		userAgents:      make(map[string]string),
+		permissions:     make(map[string]config.UserPermission),
+		userPersonas:    make(map[string]string),
+		agentWorkDirs:   make(map[string]string),
+		agentCodexHomes: make(map[string]string),
+		factory:         factory,
+		saveUserAgent:   saveUserAgent,
+		mergeSettings:   DefaultMergeSettings(),
+		usage:           make(map[string]*dailyUsage),
 	}
 }
 
@@ -206,6 +208,21 @@ func (h *Handler) SetAgentWorkDirs(workDirs map[string]string) {
 	h.agentWorkDirs = make(map[string]string, len(workDirs))
 	for name, dir := range workDirs {
 		h.agentWorkDirs[name] = dir
+	}
+}
+
+// SetAgentCodexHomes sets the configured CODEX_HOME for each acp-type agent
+// that has one (e.g. codex-shared's isolated home). Agents without an
+// explicit CODEX_HOME override (e.g. the owner's real "codex") are absent
+// from this map and fall back to defaultCodexGeneratedImagesRoot() in
+// allowedAttachmentRoots.
+func (h *Handler) SetAgentCodexHomes(codexHomes map[string]string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.agentCodexHomes = make(map[string]string, len(codexHomes))
+	for name, home := range codexHomes {
+		h.agentCodexHomes[name] = home
 	}
 }
 
@@ -1288,10 +1305,14 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 
 	h.mu.RLock()
 	agentDir := h.agentWorkDirs[agentName]
+	codexHome := h.agentCodexHomes[agentName]
 	h.mu.RUnlock()
 
 	if agentDir != "" {
 		roots = append(roots, agentDir)
+	}
+	if codexHome != "" {
+		roots = append(roots, filepath.Join(codexHome, "generated_images"))
 	}
 
 	return roots
