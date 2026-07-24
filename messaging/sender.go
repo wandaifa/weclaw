@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/store"
@@ -34,6 +35,65 @@ func SendTypingState(ctx context.Context, client *ilink.Client, userID, contextT
 
 	log.Printf("[sender] bot=%s sent typing indicator to %s", client.BotID(), userID)
 	return nil
+}
+
+// typingRefreshInterval is how often the typing indicator is resent while an
+// agent call is in flight. WeChat's "对方正在输入" animation fades on its own
+// if not refreshed; previously it was only sent once at the start of a turn,
+// so long-running requests (e.g. image generation, which can take minutes)
+// went visibly silent partway through.
+const typingRefreshInterval = 8 * time.Second
+
+// stillWorkingThreshold is how long an agent call must run before a one-time
+// "还在处理中" text nudge is sent. The typing animation alone doesn't tell an
+// anxious user whether the bot is still working or stuck.
+const stillWorkingThreshold = 20 * time.Second
+
+func stillWorkingReply() string {
+	return "还在处理中，请稍等…"
+}
+
+// withTypingRefresh runs work() while periodically refreshing the typing
+// indicator and, if work() is still running past stillWorkingThreshold,
+// sending one "还在处理中" text nudge. client may be nil (as in tests that
+// never run long enough to reach a refresh tick) — refresh/nudge sends are
+// skipped in that case rather than dereferencing a nil client.
+func withTypingRefresh(ctx context.Context, client *ilink.Client, userID, contextToken string, work func()) {
+	withTypingRefreshEvery(ctx, client, userID, contextToken, typingRefreshInterval, stillWorkingThreshold, work)
+}
+
+// withTypingRefreshEvery is withTypingRefresh with explicit durations, split
+// out so tests can use short intervals instead of the real 8s/20s constants.
+func withTypingRefreshEvery(ctx context.Context, client *ilink.Client, userID, contextToken string, refreshInterval, nudgeThreshold time.Duration, work func()) {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(refreshInterval)
+		defer ticker.Stop()
+		nudge := time.NewTimer(nudgeThreshold)
+		defer nudge.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if client == nil {
+					continue
+				}
+				if err := SendTypingState(ctx, client, userID, contextToken); err != nil {
+					log.Printf("[handler] failed to refresh typing state: %v", err)
+				}
+			case <-nudge.C:
+				if client == nil {
+					continue
+				}
+				if err := SendTextReply(ctx, client, userID, stillWorkingReply(), contextToken, NewClientID()); err != nil {
+					log.Printf("[handler] failed to send still-working nudge: %v", err)
+				}
+			}
+		}
+	}()
+	work()
+	close(done)
 }
 
 // ReplyMeta carries optional persistence context for a reply: which agent

@@ -1077,7 +1077,7 @@ func (h *Handler) sendToDefaultAgent(ctx context.Context, client *ilink.Client, 
 	var elapsed time.Duration
 	if ag != nil {
 		var err error
-		reply, elapsed, err = h.chatWithAgent(ctx, ag, msg.FromUserID, text)
+		reply, elapsed, err = h.chatWithAgent(ctx, client, ag, msg.FromUserID, msg.ContextToken, text)
 		if err != nil {
 			reply = agentFailureReply(agentName, err)
 		}
@@ -1210,7 +1210,7 @@ func (h *Handler) sendToNamedAgent(ctx context.Context, client *ilink.Client, ms
 		return
 	}
 
-	reply, elapsed, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+	reply, elapsed, err := h.chatWithAgent(ctx, client, ag, msg.FromUserID, msg.ContextToken, message)
 	if err != nil {
 		reply = agentFailureReply(name, err)
 	}
@@ -1244,7 +1244,7 @@ func (h *Handler) broadcastToAgents(ctx context.Context, client *ilink.Client, m
 				ch <- result{name: n, reply: agentFailureReply(n, err)}
 				return
 			}
-			reply, elapsed, err := h.chatWithAgent(ctx, ag, msg.FromUserID, message)
+			reply, elapsed, err := h.chatWithAgent(ctx, client, ag, msg.FromUserID, msg.ContextToken, message)
 			if err != nil {
 				ch <- result{name: n, reply: agentFailureReply(n, err)}
 				return
@@ -1318,8 +1318,11 @@ func (h *Handler) allowedAttachmentRoots(agentName string) []string {
 	return roots
 }
 
-// chatWithAgent sends a message to an agent and returns the reply, with logging.
-func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, message string) (string, time.Duration, error) {
+// chatWithAgent sends a message to an agent and returns the reply, with
+// logging. client/contextToken are used to keep the WeChat typing indicator
+// alive for the duration of the call (see withTypingRefresh) — client may be
+// nil in tests that never run long enough to reach a refresh tick.
+func (h *Handler) chatWithAgent(ctx context.Context, client *ilink.Client, ag agent.Agent, userID, contextToken, message string) (string, time.Duration, error) {
 	if pa, ok := ag.(agent.PolicyAwareAgent); ok {
 		pa.SetConversationPolicy(userID, h.conversationPolicy(userID))
 	}
@@ -1332,7 +1335,11 @@ func (h *Handler) chatWithAgent(ctx context.Context, ag agent.Agent, userID, mes
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
 	start := time.Now()
-	reply, err := ag.Chat(ctx, userID, message)
+	var reply string
+	var err error
+	withTypingRefresh(ctx, client, userID, contextToken, func() {
+		reply, err = ag.Chat(ctx, userID, message)
+	})
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -1843,12 +1850,14 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 	var elapsed time.Duration
 	if imgAgent, ok := ag.(agent.ImageChatAgent); ok {
 		log.Printf("[handler] bot=%s sending image to agent via ChatWithImage for %s", botID, msg.FromUserID)
-		reply, err = imgAgent.ChatWithImage(ctx, msg.FromUserID, "请识别并描述这张图片的内容。", &agent.ImageInput{
-			MimeType: mimeType,
-			Data:     data,
+		withTypingRefresh(ctx, client, msg.FromUserID, msg.ContextToken, func() {
+			reply, err = imgAgent.ChatWithImage(ctx, msg.FromUserID, "请识别并描述这张图片的内容。", &agent.ImageInput{
+				MimeType: mimeType,
+				Data:     data,
+			})
 		})
 	} else {
-		reply, elapsed, err = h.chatWithAgent(ctx, ag, msg.FromUserID, "[用户发送了一张图片，但当前 agent 不支持图片处理]")
+		reply, elapsed, err = h.chatWithAgent(ctx, client, ag, msg.FromUserID, msg.ContextToken, "[用户发送了一张图片，但当前 agent 不支持图片处理]")
 	}
 	if err != nil {
 		reply = agentFailureReply(agentName, err)

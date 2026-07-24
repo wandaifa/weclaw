@@ -936,7 +936,7 @@ func TestChatWithAgentInjectsPersonaOverrideForNonOwner(t *testing.T) {
 	h.SetPersonaDir(dir)
 	fake := &recordingAgent{}
 
-	if _, _, err := h.chatWithAgent(context.Background(), fake, "non-owner-test@im.wechat", "hi"); err != nil {
+	if _, _, err := h.chatWithAgent(context.Background(), nil, fake, "non-owner-test@im.wechat", "", "hi"); err != nil {
 		t.Fatalf("chatWithAgent: %v", err)
 	}
 
@@ -956,7 +956,7 @@ func TestChatWithAgentSkipsPersonaOverrideForOwner(t *testing.T) {
 	fake := &recordingAgent{}
 
 	ownerID := config.OwnerUserIDs()[0]
-	if _, _, err := h.chatWithAgent(context.Background(), fake, ownerID, "hi"); err != nil {
+	if _, _, err := h.chatWithAgent(context.Background(), nil, fake, ownerID, "", "hi"); err != nil {
 		t.Fatalf("chatWithAgent: %v", err)
 	}
 
