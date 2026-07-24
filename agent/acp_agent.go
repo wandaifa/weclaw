@@ -347,10 +347,11 @@ func (a *ACPAgent) SetCwd(cwd string) {
 	a.cwd = cwd
 }
 
-// codexHome returns the CODEX_HOME this agent instance actually runs with:
-// the env override if the agent config set one (e.g. codex-shared's
-// isolated home), otherwise the real OS home directory (owner's real
-// codex instance, which has no CODEX_HOME override).
+// codexHome returns the CODEX_HOME directory this agent instance actually
+// runs with: the env override if the agent config set one (e.g.
+// codex-shared's isolated home, which already IS the CODEX_HOME dir),
+// otherwise the owner's real codex instance at "<OS home>/.codex" (owner's
+// codex-cli has no CODEX_HOME override and falls back to that default).
 func (a *ACPAgent) codexHome() string {
 	if home := a.env["CODEX_HOME"]; home != "" {
 		return home
@@ -359,7 +360,7 @@ func (a *ACPAgent) codexHome() string {
 	if err != nil {
 		return ""
 	}
-	return home
+	return filepath.Join(home, ".codex")
 }
 
 // SetConversationPolicy records the sandbox tier for one conversationID.
@@ -915,7 +916,7 @@ func codexGeneratedImagePaths(home, threadID string) []string {
 	if threadID == "" || home == "" {
 		return nil
 	}
-	root := filepath.Join(home, ".codex", "generated_images", threadID)
+	root := filepath.Join(home, "generated_images", threadID)
 	var paths []string
 	if err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {

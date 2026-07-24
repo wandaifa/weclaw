@@ -275,7 +275,7 @@ func TestAppendNewCodexGeneratedImages(t *testing.T) {
 	t.Setenv("HOME", home)
 
 	threadID := "thread-1"
-	imageDir := filepath.Join(home, ".codex", "generated_images", threadID)
+	imageDir := filepath.Join(home, "generated_images", threadID)
 	if err := os.MkdirAll(imageDir, 0o755); err != nil {
 		t.Fatalf("mkdir image dir: %v", err)
 	}
@@ -316,14 +316,15 @@ func TestCodexHomeFallsBackToRealHomeWhenUnset(t *testing.T) {
 	if err != nil {
 		t.Skip("cannot determine real home dir in this environment")
 	}
-	if got := a.codexHome(); got != realHome {
-		t.Fatalf("codexHome() = %q, want real home %q", got, realHome)
+	want := filepath.Join(realHome, ".codex")
+	if got := a.codexHome(); got != want {
+		t.Fatalf("codexHome() = %q, want real codex home %q", got, want)
 	}
 }
 
 func TestCodexGeneratedImagePathsUsesGivenHomeNotRealHome(t *testing.T) {
 	dir := t.TempDir()
-	imgDir := filepath.Join(dir, ".codex", "generated_images", "thread-x")
+	imgDir := filepath.Join(dir, "generated_images", "thread-x")
 	if err := os.MkdirAll(imgDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
