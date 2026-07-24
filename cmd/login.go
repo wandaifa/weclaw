@@ -113,13 +113,41 @@ func localAPIURL(addr, path string) (string, error) {
 	return parsed.String(), nil
 }
 
+// loginWelcomeMaxAttempts/loginWelcomeRetryDelay give iLink's backend time
+// to finish "preparing" a session right after QR confirmation. Sending
+// immediately can fail with ret=-2 "prepare failed" (observed 2026-07-24)
+// because the just-confirmed account isn't ready to receive send requests
+// yet, even though the credentials themselves are already valid.
+const loginWelcomeMaxAttempts = 5
+const loginWelcomeRetryDelay = 2 * time.Second
+
 func sendLoginWelcome(ctx context.Context, creds *ilink.Credentials) error {
+	return sendLoginWelcomeWithRetry(ctx, creds, loginWelcomeMaxAttempts, loginWelcomeRetryDelay)
+}
+
+// sendLoginWelcomeWithRetry is sendLoginWelcome with an injectable attempt
+// count/delay so tests don't have to wait out the real multi-second retry
+// window.
+func sendLoginWelcomeWithRetry(ctx context.Context, creds *ilink.Credentials, maxAttempts int, retryDelay time.Duration) error {
 	if creds.ILinkUserID == "" {
 		return fmt.Errorf("login did not return the scanner's WeChat user ID")
 	}
-	if err := messaging.SendTextReply(ctx, ilink.NewClient(creds), creds.ILinkUserID, loginWelcomeText, "", ""); err != nil {
-		return err
+	client := ilink.NewClient(creds)
+
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		lastErr = messaging.SendTextReply(ctx, client, creds.ILinkUserID, loginWelcomeText, "", "")
+		if lastErr == nil {
+			fmt.Println("Login welcome message sent.")
+			return nil
+		}
+		if attempt < maxAttempts {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(retryDelay):
+			}
+		}
 	}
-	fmt.Println("Login welcome message sent.")
-	return nil
+	return fmt.Errorf("after %d attempts: %w", maxAttempts, lastErr)
 }
