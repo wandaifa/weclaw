@@ -23,6 +23,7 @@ const (
 	MessageMergePath       = "/api/internal/settings/message-merge"
 	MediaRetentionPath     = "/api/internal/settings/media-retention"
 	AccessModePath         = "/api/internal/settings/access-mode"
+	NonOwnerRoutingPath    = "/api/internal/settings/non-owner-routing"
 	PermissionsPath        = "/api/internal/permissions"
 	PermissionsBlockPath   = "/api/internal/permissions/block"
 	PermissionsUsagePath   = "/api/internal/permissions/usage"
@@ -90,6 +91,17 @@ type AccessModeSettings struct {
 
 type AccessModeProvider func() AccessModeSettings
 type AccessModeController func(context.Context, AccessModeSettings) (AccessModeSettings, error)
+
+// NonOwnerRoutingSettings is the JSON-safe representation of which agent
+// non-owner users default to, and whether they may switch between
+// claude/codex-shared themselves.
+type NonOwnerRoutingSettings struct {
+	DefaultAgent string `json:"default_agent"` // "" displayed/stored as "codex-shared" (the actual default)
+	AllowSwitch  bool   `json:"allow_switch"`
+}
+
+type NonOwnerRoutingProvider func() NonOwnerRoutingSettings
+type NonOwnerRoutingController func(context.Context, NonOwnerRoutingSettings) (NonOwnerRoutingSettings, error)
 
 // UserPermissionInfo describes one WeChat user's configured sandbox tier for
 // the internal permissions API. Owners are listed read-only (IsOwner=true)
@@ -189,28 +201,30 @@ type PermissionPersonaController func(context.Context, PermissionPersonaRequest)
 
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	mu                sync.RWMutex
-	clients           []*ilink.Client
-	reloader          AccountReloader
-	status            AccountStatusProvider
-	state             AccountStateController
-	remove            AccountRemoveController
-	deletedAccounts   DeletedAccountsProvider
-	merge             MessageMergeProvider
-	setMerge          MessageMergeController
-	mediaRetention    MediaRetentionProvider
-	setMediaRetention MediaRetentionController
-	accessMode        AccessModeProvider
-	setAccessMode     AccessModeController
-	permissions       PermissionsProvider
-	setPermission     PermissionController
-	blockPermission   PermissionBlockController
-	usage             UsageProvider
-	personas          PersonasProvider
-	savePersona       PersonaSaveController
-	deletePersona     PersonaDeleteController
-	setPersonaBinding PermissionPersonaController
-	addr              string
+	mu                 sync.RWMutex
+	clients            []*ilink.Client
+	reloader           AccountReloader
+	status             AccountStatusProvider
+	state              AccountStateController
+	remove             AccountRemoveController
+	deletedAccounts    DeletedAccountsProvider
+	merge              MessageMergeProvider
+	setMerge           MessageMergeController
+	mediaRetention     MediaRetentionProvider
+	setMediaRetention  MediaRetentionController
+	accessMode         AccessModeProvider
+	setAccessMode      AccessModeController
+	nonOwnerRouting    NonOwnerRoutingProvider
+	setNonOwnerRouting NonOwnerRoutingController
+	permissions        PermissionsProvider
+	setPermission      PermissionController
+	blockPermission    PermissionBlockController
+	usage              UsageProvider
+	personas           PersonasProvider
+	savePersona        PersonaSaveController
+	deletePersona      PersonaDeleteController
+	setPersonaBinding  PermissionPersonaController
+	addr               string
 }
 
 // NewServer creates an API server.
@@ -294,6 +308,18 @@ func (s *Server) SetAccessModeController(controller AccessModeController) {
 	s.setAccessMode = controller
 }
 
+func (s *Server) SetNonOwnerRoutingProvider(provider NonOwnerRoutingProvider) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.nonOwnerRouting = provider
+}
+
+func (s *Server) SetNonOwnerRoutingController(controller NonOwnerRoutingController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.setNonOwnerRouting = controller
+}
+
 // SetPermissionsProvider exposes per-user sandbox tiers through the loopback-only permissions endpoint.
 func (s *Server) SetPermissionsProvider(provider PermissionsProvider) {
 	s.mu.Lock()
@@ -372,6 +398,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(MessageMergePath, s.handleMessageMerge)
 	mux.HandleFunc(MediaRetentionPath, s.handleMediaRetention)
 	mux.HandleFunc(AccessModePath, s.handleAccessMode)
+	mux.HandleFunc(NonOwnerRoutingPath, s.handleNonOwnerRouting)
 	mux.HandleFunc(PermissionsPath, s.handlePermissions)
 	mux.HandleFunc(PermissionsBlockPath, s.handlePermissionsBlock)
 	mux.HandleFunc(PermissionsUsagePath, s.handlePermissionsUsage)
@@ -752,6 +779,45 @@ func (s *Server) handleAccessMode(w http.ResponseWriter, r *http.Request) {
 	updated, err := controller(r.Context(), settings)
 	if err != nil {
 		http.Error(w, "invalid access mode: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handleNonOwnerRouting(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	s.mu.RLock()
+	provider, controller := s.nonOwnerRouting, s.setNonOwnerRouting
+	s.mu.RUnlock()
+	if r.Method == http.MethodGet {
+		if provider == nil {
+			http.Error(w, "non-owner routing settings unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(provider())
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if controller == nil {
+		http.Error(w, "non-owner routing settings unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var settings NonOwnerRoutingSettings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	updated, err := controller(r.Context(), settings)
+	if err != nil {
+		http.Error(w, "invalid settings: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")

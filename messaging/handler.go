@@ -484,6 +484,22 @@ func (h *Handler) SetAllowNonOwnerAgentSwitch(allow bool) {
 	h.mu.Unlock()
 }
 
+// NonOwnerDefaultAgent returns the currently configured non-owner default
+// agent name, as set by SetNonOwnerDefaultAgent.
+func (h *Handler) NonOwnerDefaultAgent() string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.nonOwnerAgent
+}
+
+// AllowNonOwnerAgentSwitch reports whether non-owner users may switch
+// between claude and codex-shared, as set by SetAllowNonOwnerAgentSwitch.
+func (h *Handler) AllowNonOwnerAgentSwitch() bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.allowNonOwnerSwitch
+}
+
 // nonOwnerSwitchTarget resolves a non-owner's literal "/claude" or "/codex"
 // prefix to the actual agent name they're allowed to reach. Deliberately a
 // separate, narrow resolver from resolveAlias/agentAliases (the owner's

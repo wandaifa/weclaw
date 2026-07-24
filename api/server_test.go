@@ -523,3 +523,51 @@ func TestHandlePermissionsPersonaIsIndependentOfLevelSave(t *testing.T) {
 		t.Fatalf("second bind must preserve level/quota, got %+v", got)
 	}
 }
+
+func TestHandleNonOwnerRoutingReadsAndUpdates(t *testing.T) {
+	stored := NonOwnerRoutingSettings{DefaultAgent: "codex-shared", AllowSwitch: false}
+	server := NewServer(nil, "")
+	server.SetNonOwnerRoutingProvider(func() NonOwnerRoutingSettings { return stored })
+	server.SetNonOwnerRoutingController(func(_ context.Context, s NonOwnerRoutingSettings) (NonOwnerRoutingSettings, error) {
+		stored = s
+		return stored, nil
+	})
+
+	get := httptest.NewRequest(http.MethodGet, NonOwnerRoutingPath, nil)
+	get.RemoteAddr = "127.0.0.1:12345"
+	getResp := httptest.NewRecorder()
+	server.handleNonOwnerRouting(getResp, get)
+	if getResp.Code != http.StatusOK || !strings.Contains(getResp.Body.String(), "codex-shared") {
+		t.Fatalf("GET = %d %s", getResp.Code, getResp.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, NonOwnerRoutingPath, bytes.NewBufferString(`{"default_agent":"claude","allow_switch":true}`))
+	post.RemoteAddr = "127.0.0.1:12345"
+	postResp := httptest.NewRecorder()
+	server.handleNonOwnerRouting(postResp, post)
+	if postResp.Code != http.StatusOK {
+		t.Fatalf("POST = %d %s", postResp.Code, postResp.Body.String())
+	}
+	if stored.DefaultAgent != "claude" || !stored.AllowSwitch {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+func TestHandleNonOwnerRoutingRejectsNonLoopback(t *testing.T) {
+	called := false
+	server := NewServer(nil, "")
+	server.SetNonOwnerRoutingController(func(_ context.Context, s NonOwnerRoutingSettings) (NonOwnerRoutingSettings, error) {
+		called = true
+		return s, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, NonOwnerRoutingPath, bytes.NewBufferString(`{}`))
+	req.RemoteAddr = "192.0.2.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleNonOwnerRouting(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.Code)
+	}
+	if called {
+		t.Fatal("controller should not be called for a non-loopback request")
+	}
+}

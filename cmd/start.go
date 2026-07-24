@@ -320,6 +320,29 @@ func runStart(cmd *cobra.Command, args []string) error {
 		handler.SetAccessMode(mode)
 		return api.AccessModeSettings{Mode: string(mode)}, nil
 	})
+	apiServer.SetNonOwnerRoutingProvider(func() api.NonOwnerRoutingSettings {
+		defaultAgent := handler.NonOwnerDefaultAgent()
+		if defaultAgent == "" {
+			defaultAgent = "codex-shared"
+		}
+		return api.NonOwnerRoutingSettings{DefaultAgent: defaultAgent, AllowSwitch: handler.AllowNonOwnerAgentSwitch()}
+	})
+	apiServer.SetNonOwnerRoutingController(func(_ context.Context, settings api.NonOwnerRoutingSettings) (api.NonOwnerRoutingSettings, error) {
+		if settings.DefaultAgent != "claude" && settings.DefaultAgent != "codex-shared" {
+			return api.NonOwnerRoutingSettings{}, fmt.Errorf("default_agent must be \"claude\" or \"codex-shared\", got %q", settings.DefaultAgent)
+		}
+		configMu.Lock()
+		cfg.NonOwnerDefaultAgent = settings.DefaultAgent
+		cfg.AllowNonOwnerAgentSwitch = settings.AllowSwitch
+		saveErr := config.Save(cfg)
+		configMu.Unlock()
+		if saveErr != nil {
+			return api.NonOwnerRoutingSettings{}, saveErr
+		}
+		handler.SetNonOwnerDefaultAgent(settings.DefaultAgent)
+		handler.SetAllowNonOwnerAgentSwitch(settings.AllowSwitch)
+		return settings, nil
+	})
 	apiServer.SetPermissionsProvider(func() []api.UserPermissionInfo {
 		infos := make([]api.UserPermissionInfo, 0)
 		for _, ownerID := range config.OwnerUserIDs() {
