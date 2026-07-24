@@ -24,7 +24,7 @@ const (
 	MediaRetentionPath     = "/api/internal/settings/media-retention"
 	AccessModePath         = "/api/internal/settings/access-mode"
 	NonOwnerRoutingPath    = "/api/internal/settings/non-owner-routing"
-	CodexSharedModelPath   = "/api/internal/settings/codex-shared-model"
+	AgentModelPath         = "/api/internal/settings/agent-model"
 	PermissionsPath        = "/api/internal/permissions"
 	PermissionsBlockPath   = "/api/internal/permissions/block"
 	PermissionsUsagePath   = "/api/internal/permissions/usage"
@@ -104,17 +104,32 @@ type NonOwnerRoutingSettings struct {
 type NonOwnerRoutingProvider func() NonOwnerRoutingSettings
 type NonOwnerRoutingController func(context.Context, NonOwnerRoutingSettings) (NonOwnerRoutingSettings, error)
 
-// CodexSharedModelSettings is the JSON-safe representation of the model
-// tier and reasoning effort codex-shared (the isolated codex instance
-// non-owner users default to) uses. Empty fields mean "use codex's own
+// AgentModelSettings is the JSON-safe representation of one agent's model
+// tier and reasoning effort. Empty fields mean "use the agent's own
 // defaults" — same convention as the config.json fields they mirror.
-type CodexSharedModelSettings struct {
+// ModelReasoningEffort is ignored for agents with no such concept (claude).
+type AgentModelSettings struct {
 	Model                string `json:"model"`
 	ModelReasoningEffort string `json:"model_reasoning_effort"`
 }
 
-type CodexSharedModelProvider func() CodexSharedModelSettings
-type CodexSharedModelController func(context.Context, CodexSharedModelSettings) (CodexSharedModelSettings, error)
+// AgentModelSettingsResponse is the GET response: current settings for
+// every agent whose model tier can be changed live, keyed by agent name
+// ("codex-shared", "claude").
+type AgentModelSettingsResponse struct {
+	Agents map[string]AgentModelSettings `json:"agents"`
+}
+
+// AgentModelUpdateRequest is the POST body: which agent to update and its
+// new settings.
+type AgentModelUpdateRequest struct {
+	Agent                string `json:"agent"`
+	Model                string `json:"model"`
+	ModelReasoningEffort string `json:"model_reasoning_effort"`
+}
+
+type AgentModelProvider func() AgentModelSettingsResponse
+type AgentModelController func(context.Context, AgentModelUpdateRequest) (AgentModelSettingsResponse, error)
 
 // UserPermissionInfo describes one WeChat user's configured sandbox tier for
 // the internal permissions API. Owners are listed read-only (IsOwner=true)
@@ -214,32 +229,32 @@ type PermissionPersonaController func(context.Context, PermissionPersonaRequest)
 
 // Server provides an HTTP API for sending messages.
 type Server struct {
-	mu                  sync.RWMutex
-	clients             []*ilink.Client
-	reloader            AccountReloader
-	status              AccountStatusProvider
-	state               AccountStateController
-	remove              AccountRemoveController
-	deletedAccounts     DeletedAccountsProvider
-	merge               MessageMergeProvider
-	setMerge            MessageMergeController
-	mediaRetention      MediaRetentionProvider
-	setMediaRetention   MediaRetentionController
-	accessMode          AccessModeProvider
-	setAccessMode       AccessModeController
-	nonOwnerRouting     NonOwnerRoutingProvider
-	setNonOwnerRouting  NonOwnerRoutingController
-	codexSharedModel    CodexSharedModelProvider
-	setCodexSharedModel CodexSharedModelController
-	permissions         PermissionsProvider
-	setPermission       PermissionController
-	blockPermission     PermissionBlockController
-	usage               UsageProvider
-	personas            PersonasProvider
-	savePersona         PersonaSaveController
-	deletePersona       PersonaDeleteController
-	setPersonaBinding   PermissionPersonaController
-	addr                string
+	mu                 sync.RWMutex
+	clients            []*ilink.Client
+	reloader           AccountReloader
+	status             AccountStatusProvider
+	state              AccountStateController
+	remove             AccountRemoveController
+	deletedAccounts    DeletedAccountsProvider
+	merge              MessageMergeProvider
+	setMerge           MessageMergeController
+	mediaRetention     MediaRetentionProvider
+	setMediaRetention  MediaRetentionController
+	accessMode         AccessModeProvider
+	setAccessMode      AccessModeController
+	nonOwnerRouting    NonOwnerRoutingProvider
+	setNonOwnerRouting NonOwnerRoutingController
+	agentModel         AgentModelProvider
+	setAgentModel      AgentModelController
+	permissions        PermissionsProvider
+	setPermission      PermissionController
+	blockPermission    PermissionBlockController
+	usage              UsageProvider
+	personas           PersonasProvider
+	savePersona        PersonaSaveController
+	deletePersona      PersonaDeleteController
+	setPersonaBinding  PermissionPersonaController
+	addr               string
 }
 
 // NewServer creates an API server.
@@ -335,16 +350,16 @@ func (s *Server) SetNonOwnerRoutingController(controller NonOwnerRoutingControll
 	s.setNonOwnerRouting = controller
 }
 
-func (s *Server) SetCodexSharedModelProvider(provider CodexSharedModelProvider) {
+func (s *Server) SetAgentModelProvider(provider AgentModelProvider) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.codexSharedModel = provider
+	s.agentModel = provider
 }
 
-func (s *Server) SetCodexSharedModelController(controller CodexSharedModelController) {
+func (s *Server) SetAgentModelController(controller AgentModelController) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.setCodexSharedModel = controller
+	s.setAgentModel = controller
 }
 
 // SetPermissionsProvider exposes per-user sandbox tiers through the loopback-only permissions endpoint.
@@ -426,7 +441,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(MediaRetentionPath, s.handleMediaRetention)
 	mux.HandleFunc(AccessModePath, s.handleAccessMode)
 	mux.HandleFunc(NonOwnerRoutingPath, s.handleNonOwnerRouting)
-	mux.HandleFunc(CodexSharedModelPath, s.handleCodexSharedModel)
+	mux.HandleFunc(AgentModelPath, s.handleAgentModel)
 	mux.HandleFunc(PermissionsPath, s.handlePermissions)
 	mux.HandleFunc(PermissionsBlockPath, s.handlePermissionsBlock)
 	mux.HandleFunc(PermissionsUsagePath, s.handlePermissionsUsage)
@@ -852,17 +867,17 @@ func (s *Server) handleNonOwnerRouting(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(updated)
 }
 
-func (s *Server) handleCodexSharedModel(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleAgentModel(w http.ResponseWriter, r *http.Request) {
 	if !isLoopbackRequest(r.RemoteAddr) {
 		http.Error(w, "local requests only", http.StatusForbidden)
 		return
 	}
 	s.mu.RLock()
-	provider, controller := s.codexSharedModel, s.setCodexSharedModel
+	provider, controller := s.agentModel, s.setAgentModel
 	s.mu.RUnlock()
 	if r.Method == http.MethodGet {
 		if provider == nil {
-			http.Error(w, "codex-shared model settings unavailable", http.StatusServiceUnavailable)
+			http.Error(w, "agent model settings unavailable", http.StatusServiceUnavailable)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -874,15 +889,15 @@ func (s *Server) handleCodexSharedModel(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if controller == nil {
-		http.Error(w, "codex-shared model settings unavailable", http.StatusServiceUnavailable)
+		http.Error(w, "agent model settings unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	var settings CodexSharedModelSettings
-	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+	var req AgentModelUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	updated, err := controller(r.Context(), settings)
+	updated, err := controller(r.Context(), req)
 	if err != nil {
 		http.Error(w, "invalid settings: "+err.Error(), http.StatusBadRequest)
 		return

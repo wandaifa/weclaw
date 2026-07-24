@@ -572,46 +572,53 @@ func TestHandleNonOwnerRoutingRejectsNonLoopback(t *testing.T) {
 	}
 }
 
-func TestHandleCodexSharedModelReadsAndUpdates(t *testing.T) {
-	stored := CodexSharedModelSettings{Model: "", ModelReasoningEffort: ""}
+func TestHandleAgentModelReadsAndUpdates(t *testing.T) {
+	stored := AgentModelSettingsResponse{Agents: map[string]AgentModelSettings{
+		"codex-shared": {},
+		"claude":       {},
+	}}
 	server := NewServer(nil, "")
-	server.SetCodexSharedModelProvider(func() CodexSharedModelSettings { return stored })
-	server.SetCodexSharedModelController(func(_ context.Context, s CodexSharedModelSettings) (CodexSharedModelSettings, error) {
-		stored = s
+	server.SetAgentModelProvider(func() AgentModelSettingsResponse { return stored })
+	server.SetAgentModelController(func(_ context.Context, req AgentModelUpdateRequest) (AgentModelSettingsResponse, error) {
+		stored.Agents[req.Agent] = AgentModelSettings{Model: req.Model, ModelReasoningEffort: req.ModelReasoningEffort}
 		return stored, nil
 	})
 
-	get := httptest.NewRequest(http.MethodGet, CodexSharedModelPath, nil)
+	get := httptest.NewRequest(http.MethodGet, AgentModelPath, nil)
 	get.RemoteAddr = "127.0.0.1:12345"
 	getResp := httptest.NewRecorder()
-	server.handleCodexSharedModel(getResp, get)
+	server.handleAgentModel(getResp, get)
 	if getResp.Code != http.StatusOK {
 		t.Fatalf("GET = %d %s", getResp.Code, getResp.Body.String())
 	}
 
-	post := httptest.NewRequest(http.MethodPost, CodexSharedModelPath, bytes.NewBufferString(`{"model":"gpt-5.1-mini","model_reasoning_effort":"low"}`))
+	post := httptest.NewRequest(http.MethodPost, AgentModelPath, bytes.NewBufferString(`{"agent":"codex-shared","model":"gpt-5.5","model_reasoning_effort":"low"}`))
 	post.RemoteAddr = "127.0.0.1:12345"
 	postResp := httptest.NewRecorder()
-	server.handleCodexSharedModel(postResp, post)
+	server.handleAgentModel(postResp, post)
 	if postResp.Code != http.StatusOK {
 		t.Fatalf("POST = %d %s", postResp.Code, postResp.Body.String())
 	}
-	if stored.Model != "gpt-5.1-mini" || stored.ModelReasoningEffort != "low" {
-		t.Fatalf("stored = %+v", stored)
+	got := stored.Agents["codex-shared"]
+	if got.Model != "gpt-5.5" || got.ModelReasoningEffort != "low" {
+		t.Fatalf("stored codex-shared settings = %+v", got)
+	}
+	if stored.Agents["claude"] != (AgentModelSettings{}) {
+		t.Fatalf("updating codex-shared must not touch claude's settings, got %+v", stored.Agents["claude"])
 	}
 }
 
-func TestHandleCodexSharedModelRejectsNonLoopback(t *testing.T) {
+func TestHandleAgentModelRejectsNonLoopback(t *testing.T) {
 	called := false
 	server := NewServer(nil, "")
-	server.SetCodexSharedModelController(func(_ context.Context, s CodexSharedModelSettings) (CodexSharedModelSettings, error) {
+	server.SetAgentModelController(func(_ context.Context, req AgentModelUpdateRequest) (AgentModelSettingsResponse, error) {
 		called = true
-		return s, nil
+		return AgentModelSettingsResponse{}, nil
 	})
-	req := httptest.NewRequest(http.MethodPost, CodexSharedModelPath, bytes.NewBufferString(`{}`))
+	req := httptest.NewRequest(http.MethodPost, AgentModelPath, bytes.NewBufferString(`{}`))
 	req.RemoteAddr = "192.0.2.1:12345"
 	resp := httptest.NewRecorder()
-	server.handleCodexSharedModel(resp, req)
+	server.handleAgentModel(resp, req)
 	if resp.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403", resp.Code)
 	}

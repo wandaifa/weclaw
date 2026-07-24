@@ -355,35 +355,65 @@ func runStart(cmd *cobra.Command, args []string) error {
 		handler.SetAllowNonOwnerAgentSwitch(settings.AllowSwitch)
 		return settings, nil
 	})
-	apiServer.SetCodexSharedModelProvider(func() api.CodexSharedModelSettings {
+	// modelConfigurableAgents lists every agent name the 18022 admin panel can
+	// change the model/reasoning-effort for. Both are non-owner-facing:
+	// codex-shared is the isolated instance non-owner defaults to, and claude
+	// is the one real claude instance shared by owner and (when switched to)
+	// non-owner alike -- changing it here affects both.
+	modelConfigurableAgents := []string{"codex-shared", "claude"}
+	validReasoningEfforts := map[string]bool{"": true, "none": true, "low": true, "medium": true, "high": true, "xhigh": true}
+	apiServer.SetAgentModelProvider(func() api.AgentModelSettingsResponse {
 		configMu.Lock()
 		defer configMu.Unlock()
-		agCfg := cfg.Agents["codex-shared"]
-		return api.CodexSharedModelSettings{Model: agCfg.Model, ModelReasoningEffort: agCfg.ModelReasoningEffort}
+		agents := make(map[string]api.AgentModelSettings, len(modelConfigurableAgents))
+		for _, name := range modelConfigurableAgents {
+			agCfg := cfg.Agents[name]
+			agents[name] = api.AgentModelSettings{Model: agCfg.Model, ModelReasoningEffort: agCfg.ModelReasoningEffort}
+		}
+		return api.AgentModelSettingsResponse{Agents: agents}
 	})
-	apiServer.SetCodexSharedModelController(func(_ context.Context, settings api.CodexSharedModelSettings) (api.CodexSharedModelSettings, error) {
-		validEfforts := map[string]bool{"": true, "none": true, "low": true, "medium": true, "high": true, "xhigh": true}
-		if !validEfforts[settings.ModelReasoningEffort] {
-			return api.CodexSharedModelSettings{}, fmt.Errorf("model_reasoning_effort must be one of none/low/medium/high/xhigh (or empty), got %q", settings.ModelReasoningEffort)
+	apiServer.SetAgentModelController(func(_ context.Context, req api.AgentModelUpdateRequest) (api.AgentModelSettingsResponse, error) {
+		isConfigurable := false
+		for _, name := range modelConfigurableAgents {
+			if req.Agent == name {
+				isConfigurable = true
+				break
+			}
+		}
+		if !isConfigurable {
+			return api.AgentModelSettingsResponse{}, fmt.Errorf("agent must be one of %v, got %q", modelConfigurableAgents, req.Agent)
+		}
+		if req.Agent == "claude" && req.ModelReasoningEffort != "" {
+			return api.AgentModelSettingsResponse{}, fmt.Errorf("claude has no model_reasoning_effort concept, must be empty")
+		}
+		if !validReasoningEfforts[req.ModelReasoningEffort] {
+			return api.AgentModelSettingsResponse{}, fmt.Errorf("model_reasoning_effort must be one of none/low/medium/high/xhigh (or empty), got %q", req.ModelReasoningEffort)
 		}
 		configMu.Lock()
-		agCfg, ok := cfg.Agents["codex-shared"]
+		agCfg, ok := cfg.Agents[req.Agent]
 		if !ok {
 			configMu.Unlock()
-			return api.CodexSharedModelSettings{}, fmt.Errorf("codex-shared agent is not configured")
+			return api.AgentModelSettingsResponse{}, fmt.Errorf("agent %q is not configured", req.Agent)
 		}
-		agCfg.Model = settings.Model
-		agCfg.ModelReasoningEffort = settings.ModelReasoningEffort
-		cfg.Agents["codex-shared"] = agCfg
+		agCfg.Model = req.Model
+		agCfg.ModelReasoningEffort = req.ModelReasoningEffort
+		cfg.Agents[req.Agent] = agCfg
 		saveErr := config.Save(cfg)
 		configMu.Unlock()
 		if saveErr != nil {
-			return api.CodexSharedModelSettings{}, saveErr
+			return api.AgentModelSettingsResponse{}, saveErr
 		}
-		if err := handler.SetAgentModelConfig("codex-shared", settings.Model, settings.ModelReasoningEffort); err != nil {
-			return api.CodexSharedModelSettings{}, err
+		if err := handler.SetAgentModelConfig(req.Agent, req.Model, req.ModelReasoningEffort); err != nil {
+			return api.AgentModelSettingsResponse{}, err
 		}
-		return settings, nil
+		agents := make(map[string]api.AgentModelSettings, len(modelConfigurableAgents))
+		configMu.Lock()
+		for _, name := range modelConfigurableAgents {
+			agCfg := cfg.Agents[name]
+			agents[name] = api.AgentModelSettings{Model: agCfg.Model, ModelReasoningEffort: agCfg.ModelReasoningEffort}
+		}
+		configMu.Unlock()
+		return api.AgentModelSettingsResponse{Agents: agents}, nil
 	})
 	apiServer.SetPermissionsProvider(func() []api.UserPermissionInfo {
 		infos := make([]api.UserPermissionInfo, 0)

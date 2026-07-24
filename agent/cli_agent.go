@@ -33,6 +33,10 @@ type CLIAgent struct {
 // non-owner persona-isolation guarantee would silently stop applying.
 var _ PersonaAwareAgent = (*CLIAgent)(nil)
 
+// var _ ModelConfigurableAgent = (*CLIAgent)(nil) guards SetModelConfig the
+// same way, for the live model-tier admin panel.
+var _ ModelConfigurableAgent = (*CLIAgent)(nil)
+
 // CLIAgentConfig holds configuration for a CLI agent.
 type CLIAgentConfig struct {
 	Name         string            // agent name for logging, e.g. "claude", "codex"
@@ -120,6 +124,19 @@ func (a *CLIAgent) SetPersonaOverride(conversationID string, override PersonaOve
 	a.personas[conversationID] = override
 }
 
+// SetModelConfig updates the model this agent uses for future Chat calls
+// (e.g. claude's model tier, changed live from the 18022 admin panel).
+// Unlike ACPAgent, claude spawns a fresh process per turn and reads a.model
+// fresh each time (see chatClaude), so there's no cache to invalidate — the
+// very next message picks up the change. reasoningEffort is accepted only
+// to satisfy agent.ModelConfigurableAgent; claude's CLI has no equivalent
+// concept and this parameter is ignored.
+func (a *CLIAgent) SetModelConfig(model, _ string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.model = model
+}
+
 // Chat sends a message to the CLI agent and returns the response.
 func (a *CLIAgent) Chat(ctx context.Context, conversationID string, message string) (string, error) {
 	switch a.name {
@@ -135,9 +152,10 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 	a.mu.Lock()
 	override := a.personas[conversationID]
 	sessionID, hasSession := a.sessions[conversationID]
+	model := a.model
 	a.mu.Unlock()
 
-	args := buildClaudeArgs(message, a.model, a.systemPrompt, a.args, override, sessionID, hasSession)
+	args := buildClaudeArgs(message, model, a.systemPrompt, a.args, override, sessionID, hasSession)
 
 	if hasSession {
 		log.Printf("[cli] resuming session (command=%s, session=%s, conversation=%s)", a.command, sessionID, conversationID)

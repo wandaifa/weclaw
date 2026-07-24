@@ -53,3 +53,18 @@ func TestSetPersonaOverrideIsPerConversation(t *testing.T) {
 		t.Fatalf("personas not stored independently: a=%+v b=%+v", gotA, gotB)
 	}
 }
+
+func TestCLIAgentSetModelConfigUpdatesModelUsedByNextSpawn(t *testing.T) {
+	a := NewCLIAgent(CLIAgentConfig{Name: "claude", Command: "claude", Model: "sonnet"})
+
+	// reasoningEffort is accepted (satisfies agent.ModelConfigurableAgent) but
+	// claude's CLI has no reasoning-effort concept, so it's just ignored.
+	a.SetModelConfig("opus", "high")
+
+	a.mu.Lock()
+	got := a.model
+	a.mu.Unlock()
+	if got != "opus" {
+		t.Fatalf("model = %q, want opus", got)
+	}
+}
