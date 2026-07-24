@@ -128,9 +128,14 @@ type PolicyAwareAgent interface {
 
 // PersonaOverride carries per-conversation persona injection for agents that
 // can switch identity per user on top of a shared process configuration.
-// Only the claude CLI backend implements this today — codex's app-server is
-// a single long-lived process and can't reload its global AGENTS.md per
-// conversation (see docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md).
+// The claude CLI backend applies it directly via CLI flags on each turn.
+// ACPAgent (codex's app-server) implements it differently: codex's
+// app-server is a single long-lived process with no per-turn flag to inject
+// a persona, so SetPersonaOverride instead invalidates that conversation's
+// cached thread/session, forcing the next turn to create a fresh thread with
+// the new baseInstructions rather than reloading the process's global
+// AGENTS.md in place (see
+// docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md).
 type PersonaOverride struct {
 	// SafeMode, when true, passes --safe-mode to the claude CLI. This is
 	// what actually excludes CLAUDE.md (and skills/plugins/hooks/custom
