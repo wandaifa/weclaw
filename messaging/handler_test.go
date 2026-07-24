@@ -459,6 +459,29 @@ func TestClaudeImageGenerationRedirect(t *testing.T) {
 	}
 }
 
+func TestNudgeParamsForUsesShorterThresholdForImageGeneration(t *testing.T) {
+	threshold, text := nudgeParamsFor("帮我生成一只银渐层小猫的图片")
+	if threshold != imageGenerationNudgeThreshold {
+		t.Fatalf("threshold = %v, want imageGenerationNudgeThreshold (%v) for an image-generation request", threshold, imageGenerationNudgeThreshold)
+	}
+	if text != imageGenerationStillWorkingReply() {
+		t.Fatalf("text = %q, want the image-generation nudge text", text)
+	}
+	if threshold >= stillWorkingThreshold {
+		t.Fatalf("image-generation threshold (%v) should be shorter than the generic one (%v)", threshold, stillWorkingThreshold)
+	}
+}
+
+func TestNudgeParamsForUsesGenericThresholdForOrdinaryMessages(t *testing.T) {
+	threshold, text := nudgeParamsFor("今天天气怎么样")
+	if threshold != stillWorkingThreshold {
+		t.Fatalf("threshold = %v, want the generic stillWorkingThreshold (%v)", threshold, stillWorkingThreshold)
+	}
+	if text != stillWorkingReply() {
+		t.Fatalf("text = %q, want the generic nudge text", text)
+	}
+}
+
 func TestSaveInboundImage(t *testing.T) {
 	dir := t.TempDir()
 	data := []byte{0x89, 0x50, 0x4E, 0x47, 1, 2, 3}

@@ -44,13 +44,24 @@ func SendTypingState(ctx context.Context, client *ilink.Client, userID, contextT
 // went visibly silent partway through.
 const typingRefreshInterval = 8 * time.Second
 
-// stillWorkingThreshold is how long an agent call must run before a one-time
-// "还在处理中" text nudge is sent. The typing animation alone doesn't tell an
-// anxious user whether the bot is still working or stuck.
+// stillWorkingThreshold is how long an ordinary agent call must run before a
+// one-time "还在处理中" text nudge is sent. The typing animation alone
+// doesn't tell an anxious user whether the bot is still working or stuck.
 const stillWorkingThreshold = 20 * time.Second
+
+// imageGenerationNudgeThreshold is the shorter threshold used for requests
+// already known to be slow (image generation, which routinely takes 1-2
+// minutes) — waiting the generic 20s before the first sign of life feels too
+// long when the wait is both long and predictable, so these get an earlier,
+// more specific nudge instead.
+const imageGenerationNudgeThreshold = 5 * time.Second
 
 func stillWorkingReply() string {
 	return "还在处理中，请稍等…"
+}
+
+func imageGenerationStillWorkingReply() string {
+	return "收到，正在生成图片，预计需要 1-2 分钟，请稍等~"
 }
 
 // withTypingRefresh runs work() while periodically refreshing the typing
@@ -59,12 +70,14 @@ func stillWorkingReply() string {
 // never run long enough to reach a refresh tick) — refresh/nudge sends are
 // skipped in that case rather than dereferencing a nil client.
 func withTypingRefresh(ctx context.Context, client *ilink.Client, userID, contextToken string, work func()) {
-	withTypingRefreshEvery(ctx, client, userID, contextToken, typingRefreshInterval, stillWorkingThreshold, work)
+	withTypingRefreshEvery(ctx, client, userID, contextToken, typingRefreshInterval, stillWorkingThreshold, stillWorkingReply(), work)
 }
 
-// withTypingRefreshEvery is withTypingRefresh with explicit durations, split
-// out so tests can use short intervals instead of the real 8s/20s constants.
-func withTypingRefreshEvery(ctx context.Context, client *ilink.Client, userID, contextToken string, refreshInterval, nudgeThreshold time.Duration, work func()) {
+// withTypingRefreshEvery is withTypingRefresh with explicit durations and
+// nudge text, split out so tests can use short intervals instead of the real
+// constants, and so callers that already know a request is slow (e.g. image
+// generation) can use a shorter threshold and a more specific message.
+func withTypingRefreshEvery(ctx context.Context, client *ilink.Client, userID, contextToken string, refreshInterval, nudgeThreshold time.Duration, nudgeText string, work func()) {
 	done := make(chan struct{})
 	go func() {
 		ticker := time.NewTicker(refreshInterval)
@@ -86,7 +99,7 @@ func withTypingRefreshEvery(ctx context.Context, client *ilink.Client, userID, c
 				if client == nil {
 					continue
 				}
-				if err := SendTextReply(ctx, client, userID, stillWorkingReply(), contextToken, NewClientID()); err != nil {
+				if err := SendTextReply(ctx, client, userID, nudgeText, contextToken, NewClientID()); err != nil {
 					log.Printf("[handler] failed to send still-working nudge: %v", err)
 				}
 			}

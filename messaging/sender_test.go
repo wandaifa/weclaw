@@ -45,7 +45,7 @@ func TestWithTypingRefreshEveryRefreshesTypingPeriodically(t *testing.T) {
 	defer srv.Close()
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 
-	withTypingRefreshEvery(context.Background(), client, "user-a", "", 20*time.Millisecond, time.Hour, func() {
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", 20*time.Millisecond, time.Hour, stillWorkingReply(), func() {
 		time.Sleep(90 * time.Millisecond) // long enough for ~4 refresh ticks at 20ms
 	})
 
@@ -59,7 +59,7 @@ func TestWithTypingRefreshEverySendsNudgeAfterThreshold(t *testing.T) {
 	defer srv.Close()
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 
-	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, 20*time.Millisecond, func() {
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, 20*time.Millisecond, stillWorkingReply(), func() {
 		time.Sleep(60 * time.Millisecond) // past the 20ms nudge threshold
 	})
 
@@ -73,12 +73,31 @@ func TestWithTypingRefreshEverySendsNudgeAfterThreshold(t *testing.T) {
 	})
 }
 
+func TestWithTypingRefreshEveryUsesGivenNudgeText(t *testing.T) {
+	srv, _, sent := newTypingCountingServer(t)
+	defer srv.Close()
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, 20*time.Millisecond, imageGenerationStillWorkingReply(), func() {
+		time.Sleep(60 * time.Millisecond)
+	})
+
+	waitFor(t, time.Second, func() bool {
+		for _, text := range sent.snapshot() {
+			if text == imageGenerationStillWorkingReply() {
+				return true
+			}
+		}
+		return false
+	})
+}
+
 func TestWithTypingRefreshEveryStopsWhenWorkReturnsQuickly(t *testing.T) {
 	srv, typingCount, sent := newTypingCountingServer(t)
 	defer srv.Close()
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 
-	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, time.Hour, func() {})
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, time.Hour, stillWorkingReply(), func() {})
 
 	// Give the background goroutine a moment to (not) fire before asserting.
 	time.Sleep(20 * time.Millisecond)
@@ -92,7 +111,7 @@ func TestWithTypingRefreshEveryStopsWhenWorkReturnsQuickly(t *testing.T) {
 
 func TestWithTypingRefreshEveryNilClientDoesNotPanic(t *testing.T) {
 	ran := false
-	withTypingRefreshEvery(context.Background(), nil, "user-a", "", 5*time.Millisecond, 5*time.Millisecond, func() {
+	withTypingRefreshEvery(context.Background(), nil, "user-a", "", 5*time.Millisecond, 5*time.Millisecond, stillWorkingReply(), func() {
 		time.Sleep(30 * time.Millisecond)
 		ran = true
 	})

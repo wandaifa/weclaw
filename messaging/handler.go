@@ -1130,6 +1130,26 @@ func shouldRedirectClaudeImageGeneration(agentName, text string) bool {
 	if !strings.EqualFold(strings.TrimSpace(agentName), "claude") {
 		return false
 	}
+	return isLikelyImageGenerationRequest(text)
+}
+
+// nudgeParamsFor picks the still-working nudge threshold and text for a
+// message: image-generation requests get a shorter threshold and a more
+// specific message (see imageGenerationNudgeThreshold), since they're
+// already known to be slow — everything else gets the generic ones.
+func nudgeParamsFor(message string) (time.Duration, string) {
+	if isLikelyImageGenerationRequest(message) {
+		return imageGenerationNudgeThreshold, imageGenerationStillWorkingReply()
+	}
+	return stillWorkingThreshold, stillWorkingReply()
+}
+
+// isLikelyImageGenerationRequest heuristically detects a request to
+// generate/draw an image (as opposed to analyzing/describing an existing
+// one). Used both to redirect claude (which can't generate images) to codex,
+// and to pick a shorter, more specific "还在处理中" nudge threshold for
+// requests already known to be slow (see chatWithAgent).
+func isLikelyImageGenerationRequest(text string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(text))
 	exclusions := []string{
 		"分析图片", "识别图片", "描述图片", "图片是怎么生成", "如何生成图片",
@@ -1334,10 +1354,12 @@ func (h *Handler) chatWithAgent(ctx context.Context, client *ilink.Client, ag ag
 	info := ag.Info()
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
+	nudgeThreshold, nudgeText := nudgeParamsFor(message)
+
 	start := time.Now()
 	var reply string
 	var err error
-	withTypingRefresh(ctx, client, userID, contextToken, func() {
+	withTypingRefreshEvery(ctx, client, userID, contextToken, typingRefreshInterval, nudgeThreshold, nudgeText, func() {
 		reply, err = ag.Chat(ctx, userID, message)
 	})
 	elapsed := time.Since(start)
