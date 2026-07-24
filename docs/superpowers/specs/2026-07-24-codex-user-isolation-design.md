@@ -71,7 +71,9 @@ owner 继续用现有的 `codex` 条目（真实 `CODEX_HOME`、真实 `config.t
 
 - `config.Config` 新增 `NonOwnerDefaultAgent string`（空值兜底 `"codex-shared"`）和 `AllowNonOwnerAgentSwitch bool`（默认 `false`）。
 - `selectedAgent()`：`AllowNonOwnerAgentSwitch` 为 `false` 时，非 owner 恒定路由到 `NonOwnerDefaultAgent`（不管 `userAgents`/`defaultName`），跟一期的行为结构完全一样，只是目标从写死的 `"claude"` 变成可配置值。
-- `AllowNonOwnerAgentSwitch` 为 `true` 时（本期只搭好开关和路由分支，实际把这条路走通留到梁师傅真要开的时候）：非 owner 可以用 `/claude`、`/codex`（映射到 `codex-shared`，不是真实 `codex`）这类命令切换，但**只能在 `{"claude", "codex-shared"}` 这个白名单内切**，任何时候都碰不到真实的 `codex`（owner 专属）或其他 agent。`handleMessage` 里"非 owner 完全跳过命令解析"的那道门（`if !owner { h.sendToDefaultAgent(...); return }`）要在这个开关打开时松开一道缝，仅放行这两个 agent 名字的切换命令，其余命令（`/cwd`、broadcast 等）依然对非 owner 不可见。
+- `AllowNonOwnerAgentSwitch` 为 `true` 时（本期只搭好开关和路由分支，实际把这条路走通留到梁师傅真要开的时候）：非 owner 打 `/claude`、`/codex` 切换——**用户敲的命令名跟 owner 平时用的一样短**（`codex-shared` 只是 config.json 里的内部条目名，不会出现在任何用户可见的地方）。`handleMessage` 里"非 owner 完全跳过命令解析"的那道门（`if !owner { h.sendToDefaultAgent(...); return }`）要在这个开关打开时松开一道缝，仅放行 `/claude`、`/codex` 这两个切换命令，其余命令（`/cwd`、broadcast 等）依然对非 owner 不可见。
+
+**关键实现约束（这条写错就是一个安全漏洞，不是体验问题）**：现在 `resolveAlias` 是一张不分调用者身份的静态字符串映射表（`agentAliases`/`customAliases`），owner 打 `/codex` 解析到真实 `codex` 条目。如果非 owner 的 `/codex` 复用同一张静态表，会直接解析到真实 `codex`——那是 owner 专属实例，等于把这个项目从一开始就要防的"非 owner 摸到 owner 专属实例/人设"这个洞又开了一次。命令名到实际 agent 配置名的解析，**必须按 `config.IsOwner(userID)` 分别处理**：owner 的 `/codex` → 真实 `codex`；非 owner 的 `/codex` → `codex-shared`，两者不能共用同一张不分身份的映射表。`/claude` 双方解析结果一样（本来就没有"owner 专属 claude"和"非 owner claude"的区别），不用特殊处理。
 
 18022 后台设置页新增这两项的配置入口（复用现有 access-mode 面板的 Provider/Controller 模式）。
 
@@ -95,7 +97,7 @@ AllowNonOwnerAgentSwitch  bool   `json:"allow_non_owner_agent_switch,omitempty"`
 
 - **写实施计划前的实测前置任务**：确认 `model_reasoning_effort` 能否通过 `thread/start` 的 `config` 覆盖对象生效（今天已经证明这个 `config` 覆盖对 `project_doc_max_bytes` 不生效，不能假设对其他 key 也不生效或生效，必须单独拿真实 `app-server` 进程测一次）。测出结果再决定要不要把它也做成可配置项，测不出来就先用 codex 默认值，不阻塞其余任务。
 - `agent` 包：`ACPAgent` 实现 `PersonaAwareAgent` 的单测（`getOrCreateThread` 在有 override 时 `thread/start` 参数带 `baseInstructions`，无 override/owner 时不带）；`codexGeneratedImagePaths(home, threadID)` 改造后的参数化测试。
-- `messaging` 包：`selectedAgent()` 在 `AllowNonOwnerAgentSwitch=false`/`true` 两种状态下的路由行为；`AllowNonOwnerAgentSwitch=true` 时非 owner 切换只能命中白名单内的两个 agent。
+- `messaging` 包：`selectedAgent()` 在 `AllowNonOwnerAgentSwitch=false`/`true` 两种状态下的路由行为；`AllowNonOwnerAgentSwitch=true` 时非 owner 切换只能命中白名单内的两个 agent；**专门测一条：`AllowNonOwnerAgentSwitch=true` 时，非 owner 发 `/codex` 解析到的是 `codex-shared`，同一个 `/codex` owner 发解析到的是真实 `codex`**——这条如果测漏了，等于没测这个功能最核心的隔离前提。
 - `config` 包：新字段的 JSON round-trip + legacy 配置兼容（字段不存在时 `NonOwnerDefaultAgent` 空值要在使用处兜底成 `"codex-shared"`，不能让空字符串直接当 agent 名字用）。
 - **手动实测（不可省略，这是一期教训直接换来的纪律）**：weclaw 编译、`codex-shared` 条目跑起来后，拿真实非 owner 微信号发消息，人工确认回复不含任何私人信息、且请求生成一张图片能正常收到（重点验证 `network_access=true` 那条精简配置真的让生图跑通了）——不能只看单测绿、只看参数拼对了就当验证过。
 
