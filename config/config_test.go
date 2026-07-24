@@ -269,3 +269,49 @@ func TestConfigWithoutPersonaFieldsStillLoads(t *testing.T) {
 		t.Fatalf("UserPersonas = %#v, want nil before Load() normalizes it", cfg.UserPersonas)
 	}
 }
+
+func TestAgentConfigModelReasoningEffortRoundTrip(t *testing.T) {
+	cfg := Config{
+		Agents: map[string]AgentConfig{
+			"codex-shared": {Type: "acp", Command: "codex", ModelReasoningEffort: "low"},
+		},
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+	var decoded Config
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("round-trip unmarshal: %v", err)
+	}
+	if got := decoded.Agents["codex-shared"].ModelReasoningEffort; got != "low" {
+		t.Fatalf("ModelReasoningEffort = %q, want %q", got, "low")
+	}
+}
+
+func TestNonOwnerRoutingFieldsRoundTripAndDefaultToZeroValue(t *testing.T) {
+	var cfg Config
+	data := []byte(`{"agents":{}}`)
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("unmarshal legacy config: %v", err)
+	}
+	if cfg.NonOwnerDefaultAgent != "" {
+		t.Fatalf("NonOwnerDefaultAgent = %q, want empty for legacy config", cfg.NonOwnerDefaultAgent)
+	}
+	if cfg.AllowNonOwnerAgentSwitch {
+		t.Fatal("AllowNonOwnerAgentSwitch = true, want false for legacy config")
+	}
+
+	cfg2 := Config{NonOwnerDefaultAgent: "codex-shared", AllowNonOwnerAgentSwitch: true, Agents: map[string]AgentConfig{}}
+	data2, err := json.Marshal(cfg2)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded2 Config
+	if err := json.Unmarshal(data2, &decoded2); err != nil {
+		t.Fatalf("round-trip unmarshal: %v", err)
+	}
+	if decoded2.NonOwnerDefaultAgent != "codex-shared" || !decoded2.AllowNonOwnerAgentSwitch {
+		t.Fatalf("round-trip = %+v, want NonOwnerDefaultAgent=codex-shared AllowNonOwnerAgentSwitch=true", decoded2)
+	}
+}
