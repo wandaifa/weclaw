@@ -964,3 +964,67 @@ func TestChatWithAgentSkipsPersonaOverrideForOwner(t *testing.T) {
 		t.Fatal("owner conversations must not get a persona override")
 	}
 }
+
+func TestNonOwnerCodexCommandResolvesToCodexSharedNotRealCodex(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	h.SetAllowNonOwnerAgentSwitch(true)
+	fakeShared := &recordingAgent{}
+	fakeReal := &recordingAgent{}
+	h.SetDefaultAgent("codex-shared", fakeShared) // registers under h.agents["codex-shared"]
+	h.agents["codex"] = fakeReal                  // simulate the real owner-only codex agent also being registered
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	msg := newTestMessage("non-owner-test@im.wechat", "/codex 你好", 1)
+	h.HandleMessage(context.Background(), client, msg)
+
+	waitFor(t, 2*time.Second, func() bool { return len(fakeShared.callsSnapshot()) > 0 || len(fakeReal.callsSnapshot()) > 0 })
+	if calls := fakeReal.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("non-owner /codex must never reach the real codex agent, got calls=%v", calls)
+	}
+	if calls := fakeShared.callsSnapshot(); len(calls) != 1 || calls[0] != "你好" {
+		t.Fatalf("non-owner /codex should reach codex-shared with the message, got %v", calls)
+	}
+}
+
+func TestNonOwnerAgentSwitchDisabledByDefaultTreatsSlashCodexAsPlainText(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	// AllowNonOwnerAgentSwitch left at its default (false).
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex-shared", fake)
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	msg := newTestMessage("non-owner-test@im.wechat", "/codex 你好", 1)
+	h.HandleMessage(context.Background(), client, msg)
+
+	waitFor(t, 2*time.Second, func() bool { return len(fake.callsSnapshot()) > 0 })
+	calls := fake.callsSnapshot()
+	if len(calls) != 1 || calls[0] != "/codex 你好" {
+		t.Fatalf("with switching disabled, /codex should reach the default agent verbatim as plain text, got %v", calls)
+	}
+}
+
+func TestOwnerCodexCommandStillResolvesToRealCodex(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	h.SetAllowNonOwnerAgentSwitch(true)
+	fakeReal := &recordingAgent{}
+	h.SetDefaultAgent("codex", fakeReal)
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	ownerID := config.OwnerUserIDs()[0]
+	msg := newTestMessage(ownerID, "/codex 你好", 1)
+	h.HandleMessage(context.Background(), client, msg)
+
+	waitFor(t, 2*time.Second, func() bool { return len(fakeReal.callsSnapshot()) > 0 })
+	if calls := fakeReal.callsSnapshot(); len(calls) != 1 || calls[0] != "你好" {
+		t.Fatalf("owner /codex should still reach the real codex agent, got %v", calls)
+	}
+}

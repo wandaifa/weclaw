@@ -35,31 +35,32 @@ type AgentMeta struct {
 
 // Handler processes incoming WeChat messages and dispatches replies.
 type Handler struct {
-	mu             sync.RWMutex
-	defaultName    string
-	accessMode     config.AccessMode                // gates whether a non-owner reaches an agent at all
-	userAgents     map[string]string                // user ID -> selected agent; falls back to defaultName
-	permissions    map[string]config.UserPermission // user ID -> sandbox tier (non-owner only)
-	personaDir     string                           // ~/.weclaw/personas; empty disables persona injection
-	defaultPersona string                           // config.json default_persona; "" falls back to persona.DefaultName
-	userPersonas   map[string]string                // userID -> persona name (non-owner only)
-	nonOwnerAgent  string                           // agent name non-owner users are routed to; "" falls back to defaultNonOwnerAgentName
-	agents         map[string]agent.Agent           // name -> running agent
-	agentMetas     []AgentMeta                      // all configured agents (for /status)
-	agentWorkDirs  map[string]string                // agent name -> configured/runtime cwd
-	customAliases  map[string]string                // custom alias -> agent name (from config)
-	factory        AgentFactory
-	saveUserAgent  SaveUserAgentFunc
-	contextTokens  sync.Map // map[userID]contextToken
-	saveDir        string   // directory to save images/files to
-	seenMsgs       sync.Map // map[int64]time.Time — dedup by message_id
-	pendingMedia   sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
-	activeChats    sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
-	chatQueues     sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
-	mergeMu        sync.RWMutex
-	mergeSettings  MergeSettings
-	usageMu        sync.Mutex
-	usage          map[string]*dailyUsage // user ID -> today's message count (non-owner only, in-memory)
+	mu                  sync.RWMutex
+	defaultName         string
+	accessMode          config.AccessMode                // gates whether a non-owner reaches an agent at all
+	userAgents          map[string]string                // user ID -> selected agent; falls back to defaultName
+	permissions         map[string]config.UserPermission // user ID -> sandbox tier (non-owner only)
+	personaDir          string                           // ~/.weclaw/personas; empty disables persona injection
+	defaultPersona      string                           // config.json default_persona; "" falls back to persona.DefaultName
+	userPersonas        map[string]string                // userID -> persona name (non-owner only)
+	nonOwnerAgent       string                           // agent name non-owner users are routed to; "" falls back to defaultNonOwnerAgentName
+	allowNonOwnerSwitch bool                             // whether non-owner users may switch between claude/codex-shared via /claude, /codex
+	agents              map[string]agent.Agent           // name -> running agent
+	agentMetas          []AgentMeta                      // all configured agents (for /status)
+	agentWorkDirs       map[string]string                // agent name -> configured/runtime cwd
+	customAliases       map[string]string                // custom alias -> agent name (from config)
+	factory             AgentFactory
+	saveUserAgent       SaveUserAgentFunc
+	contextTokens       sync.Map // map[userID]contextToken
+	saveDir             string   // directory to save images/files to
+	seenMsgs            sync.Map // map[int64]time.Time — dedup by message_id
+	pendingMedia        sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
+	activeChats         sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
+	chatQueues          sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
+	mergeMu             sync.RWMutex
+	mergeSettings       MergeSettings
+	usageMu             sync.Mutex
+	usage               map[string]*dailyUsage // user ID -> today's message count (non-owner only, in-memory)
 }
 
 // dailyUsage tracks one non-owner user's message count for the current local day.
@@ -474,6 +475,49 @@ func (h *Handler) SetNonOwnerDefaultAgent(name string) {
 	h.mu.Unlock()
 }
 
+// SetAllowNonOwnerAgentSwitch controls whether non-owner users may switch
+// between claude and codex-shared via /claude and /codex. Default false:
+// non-owner is pinned to whatever SetNonOwnerDefaultAgent configured.
+func (h *Handler) SetAllowNonOwnerAgentSwitch(allow bool) {
+	h.mu.Lock()
+	h.allowNonOwnerSwitch = allow
+	h.mu.Unlock()
+}
+
+// nonOwnerSwitchTarget resolves a non-owner's literal "/claude" or "/codex"
+// prefix to the actual agent name they're allowed to reach. Deliberately a
+// separate, narrow resolver from resolveAlias/agentAliases (the owner's
+// alias table) — those are not scoped by caller identity, and non-owner
+// must never be able to resolve "/codex" to the real owner-only "codex"
+// agent. Returns ("", false) for anything else, including every alias the
+// owner's table understands (cx, cc, etc.) — non-owner gets exactly these
+// two literal, spelled-out command words, nothing shorter.
+//
+// Note: routing here goes through switchUserAgent/sendToNamedAgent, but for
+// non-owner this is message-level only, not a persistent switch —
+// selectedAgent() always pins non-owner to h.nonOwnerAgent regardless of
+// what switchUserAgent stores in h.userAgents, so the next message without
+// a /claude or /codex prefix still goes to the configured default.
+func nonOwnerSwitchTarget(trimmed string) (agentName, rest string, ok bool) {
+	for _, prefix := range []string{"/claude", "@claude"} {
+		if trimmed == prefix {
+			return "claude", "", true
+		}
+		if strings.HasPrefix(trimmed, prefix+" ") {
+			return "claude", strings.TrimSpace(trimmed[len(prefix):]), true
+		}
+	}
+	for _, prefix := range []string{"/codex", "@codex"} {
+		if trimmed == prefix {
+			return defaultNonOwnerAgentName, "", true
+		}
+		if strings.HasPrefix(trimmed, prefix+" ") {
+			return defaultNonOwnerAgentName, strings.TrimSpace(trimmed[len(prefix):]), true
+		}
+	}
+	return "", "", false
+}
+
 // selectedAgent returns the agent selected by this user, falling back to the
 // global default. Non-owner users always get h.nonOwnerAgent (or
 // defaultNonOwnerAgentName if unset) regardless of defaultName or any
@@ -863,11 +907,28 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 		return
 	}
 
-	// Non-owners never reach the agent-switch/broadcast routing below: /xxx or
-	// @xxx prefixes (including "/cwd" for them) are just ordinary chat text
-	// sent to their locked-down agent. This keeps the switching feature and
-	// its existence entirely invisible to them.
+	// Non-owners never reach the owner's agent-switch/broadcast routing
+	// below (that alias table is not scoped by caller identity — resolving
+	// through it could hand a non-owner the real, owner-only "codex"
+	// agent). The only switching non-owner ever gets is the narrow
+	// nonOwnerSwitchTarget check just below, gated by allowNonOwnerSwitch.
 	if !owner {
+		h.mu.RLock()
+		allowSwitch := h.allowNonOwnerSwitch
+		h.mu.RUnlock()
+		if allowSwitch {
+			if targetAgent, rest, matched := nonOwnerSwitchTarget(trimmed); matched {
+				if rest == "" {
+					reply := h.switchUserAgent(ctx, msg.FromUserID, targetAgent)
+					if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+						log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
+					}
+				} else {
+					h.sendToNamedAgent(ctx, client, msg, targetAgent, rest, clientID)
+				}
+				return
+			}
+		}
 		h.sendToDefaultAgent(ctx, client, msg, text, clientID)
 		return
 	}
