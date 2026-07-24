@@ -192,7 +192,12 @@ func runStart(cmd *cobra.Command, args []string) error {
 	handler.SetPersonaDir(personaDir)
 	handler.SetDefaultPersona(cfg.DefaultPersona)
 	handler.SetUserPersonas(cfg.UserPersonas)
-	handler.SetNonOwnerDefaultAgent(cfg.NonOwnerDefaultAgent)
+	nonOwnerDefaultAgent := cfg.NonOwnerDefaultAgent
+	if nonOwnerDefaultAgent != "" && nonOwnerDefaultAgent != "claude" && nonOwnerDefaultAgent != "codex-shared" {
+		log.Printf("Warning: config non_owner_default_agent must be \"claude\" or \"codex-shared\", got %q; falling back to default", nonOwnerDefaultAgent)
+		nonOwnerDefaultAgent = ""
+	}
+	handler.SetNonOwnerDefaultAgent(nonOwnerDefaultAgent)
 	handler.SetAllowNonOwnerAgentSwitch(cfg.AllowNonOwnerAgentSwitch)
 
 	// Populate agent metas for /status
