@@ -158,6 +158,17 @@ func runStart(cmd *cobra.Command, args []string) error {
 	if err := persona.EnsureDefault(personaDir); err != nil {
 		return fmt.Errorf("seed default persona: %w", err)
 	}
+	realCodexHome := os.Getenv("CODEX_HOME")
+	if realCodexHome == "" {
+		if home, err := os.UserHomeDir(); err == nil {
+			realCodexHome = filepath.Join(home, ".codex")
+		}
+	}
+	codexSharedHome, err := ensureCodexSharedHome(realCodexHome)
+	if err != nil {
+		return fmt.Errorf("set up codex-shared home: %w", err)
+	}
+	log.Printf("codex-shared isolated home ready: %s", codexSharedHome)
 	handler := messaging.NewHandler(
 		func(ctx context.Context, name string) agent.Agent {
 			return createAgentByName(ctx, cfg, name)
@@ -181,6 +192,8 @@ func runStart(cmd *cobra.Command, args []string) error {
 	handler.SetPersonaDir(personaDir)
 	handler.SetDefaultPersona(cfg.DefaultPersona)
 	handler.SetUserPersonas(cfg.UserPersonas)
+	handler.SetNonOwnerDefaultAgent(cfg.NonOwnerDefaultAgent)
+	handler.SetAllowNonOwnerAgentSwitch(cfg.AllowNonOwnerAgentSwitch)
 
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
@@ -586,12 +599,13 @@ func createAgentByName(ctx context.Context, cfg *config.Config, name string) age
 	switch agCfg.Type {
 	case "acp":
 		ag := agent.NewACPAgent(agent.ACPAgentConfig{
-			Command:      agCfg.Command,
-			Args:         agCfg.Args,
-			Cwd:          agCfg.Cwd,
-			Env:          agCfg.Env,
-			Model:        agCfg.Model,
-			SystemPrompt: agCfg.SystemPrompt,
+			Command:              agCfg.Command,
+			Args:                 agCfg.Args,
+			Cwd:                  agCfg.Cwd,
+			Env:                  agCfg.Env,
+			Model:                agCfg.Model,
+			ModelReasoningEffort: agCfg.ModelReasoningEffort,
+			SystemPrompt:         agCfg.SystemPrompt,
 		})
 		if err := ag.Start(ctx); err != nil {
 			log.Printf("[agent] failed to start ACP agent %q: %v", name, err)
