@@ -989,6 +989,33 @@ func TestNonOwnerCodexCommandResolvesToCodexSharedNotRealCodex(t *testing.T) {
 	}
 }
 
+func TestNonOwnerBareCodexSwitchReplyDoesNotLeakInternalName(t *testing.T) {
+	srv, sent := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	h.SetAllowNonOwnerAgentSwitch(true)
+	fakeShared := &recordingAgent{}
+	h.SetDefaultAgent("codex-shared", fakeShared) // registers under h.agents["codex-shared"]
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	msg := newTestMessage("non-owner-test@im.wechat", "/codex", 1)
+	h.HandleMessage(context.Background(), client, msg)
+
+	waitFor(t, 2*time.Second, func() bool { return len(sent.snapshot()) > 0 })
+	texts := sent.snapshot()
+	if len(texts) != 1 {
+		t.Fatalf("expected exactly one reply, got %v", texts)
+	}
+	reply := texts[0]
+	if strings.Contains(reply, "codex-shared") {
+		t.Fatalf("non-owner switch reply must never leak the internal agent name, got %q", reply)
+	}
+	if strings.Contains(reply, "当前微信用户") {
+		t.Fatalf("non-owner switch reply must not overstate persistence like the owner's reply does, got %q", reply)
+	}
+}
+
 func TestNonOwnerAgentSwitchDisabledByDefaultTreatsSlashCodexAsPlainText(t *testing.T) {
 	srv, _ := newFakeIlinkServer(t)
 	defer srv.Close()

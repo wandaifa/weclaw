@@ -935,7 +935,7 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 		if allowSwitch {
 			if targetAgent, rest, matched := nonOwnerSwitchTarget(trimmed); matched {
 				if rest == "" {
-					reply := h.switchUserAgent(ctx, msg.FromUserID, targetAgent)
+					reply := h.switchUserAgent(ctx, msg.FromUserID, targetAgent, true)
 					if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 						log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 					}
@@ -969,7 +969,7 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 				}
 				return
 			}
-			reply := h.switchUserAgent(ctx, msg.FromUserID, agentNames[0])
+			reply := h.switchUserAgent(ctx, msg.FromUserID, agentNames[0], false)
 			h.endChat(chatKey(client, msg.FromUserID))
 			if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 				log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
@@ -1420,7 +1420,13 @@ func quotaExceededReply() string {
 }
 
 // switchUserAgent selects an agent for one user and persists that selection.
-func (h *Handler) switchUserAgent(ctx context.Context, userID, name string) string {
+// nonOwner must be true when the caller is a non-owner user: the internal
+// agent name (e.g. "codex-shared") must never appear in a reply a non-owner
+// can see, and for non-owner this switch is message-level only — selectedAgent
+// always pins non-owner to h.nonOwnerAgent regardless of what's stored here
+// (see nonOwnerSwitchTarget's doc comment) — so the reply must not imply a
+// persistent, user-scoped setting the way the owner's reply does.
+func (h *Handler) switchUserAgent(ctx context.Context, userID, name string, nonOwner bool) string {
 	ag, err := h.getAgent(ctx, name)
 	if err != nil {
 		log.Printf("[handler] failed to switch %s to %q: %v", userID, name, err)
@@ -1446,6 +1452,14 @@ func (h *Handler) switchUserAgent(ctx context.Context, userID, name string) stri
 
 	info := ag.Info()
 	log.Printf("[handler] switched agent for %s: %s -> %s (%s)", userID, old, name, info)
+
+	if nonOwner {
+		display := name
+		if display == defaultNonOwnerAgentName {
+			display = "codex"
+		}
+		return fmt.Sprintf("已切换到 %s，仅对这条消息生效。", display)
+	}
 	return fmt.Sprintf("已切换到 %s，仅对当前微信用户生效。", name)
 }
 
