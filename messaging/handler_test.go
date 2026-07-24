@@ -439,6 +439,7 @@ func TestClaudeImageGenerationRedirect(t *testing.T) {
 		"生成一个儿童饰品海报",
 		"帮我画一只猫",
 		"generate an image of a cat",
+		"帮我设计一张美女在天安门跳舞的图片", // real production miss: "设计" wasn't in the verb list
 	}
 	for _, request := range requests {
 		if !shouldRedirectClaudeImageGeneration("claude", request) {
@@ -460,15 +461,21 @@ func TestClaudeImageGenerationRedirect(t *testing.T) {
 }
 
 func TestNudgeParamsForUsesShorterThresholdForImageGeneration(t *testing.T) {
-	threshold, text := nudgeParamsFor("帮我生成一只银渐层小猫的图片")
-	if threshold != imageGenerationNudgeThreshold {
-		t.Fatalf("threshold = %v, want imageGenerationNudgeThreshold (%v) for an image-generation request", threshold, imageGenerationNudgeThreshold)
+	requests := []string{
+		"帮我生成一只银渐层小猫的图片",
+		"帮我设计一张美女在天安门跳舞的图片", // real production miss: "设计" wasn't in the verb list
 	}
-	if text != imageGenerationStillWorkingReply() {
-		t.Fatalf("text = %q, want the image-generation nudge text", text)
-	}
-	if threshold >= stillWorkingThreshold {
-		t.Fatalf("image-generation threshold (%v) should be shorter than the generic one (%v)", threshold, stillWorkingThreshold)
+	for _, request := range requests {
+		threshold, text := nudgeParamsFor(request)
+		if threshold != imageGenerationNudgeThreshold {
+			t.Fatalf("nudgeParamsFor(%q) threshold = %v, want imageGenerationNudgeThreshold (%v)", request, threshold, imageGenerationNudgeThreshold)
+		}
+		if text != imageGenerationStillWorkingReply() {
+			t.Fatalf("nudgeParamsFor(%q) text = %q, want the image-generation nudge text", request, text)
+		}
+		if threshold >= stillWorkingThreshold {
+			t.Fatalf("image-generation threshold (%v) should be shorter than the generic one (%v)", threshold, stillWorkingThreshold)
+		}
 	}
 }
 

@@ -1163,10 +1163,15 @@ func isLikelyImageGenerationRequest(text string) bool {
 		return true
 	}
 	imageNouns := []string{"图", "照片", "海报", "插画", "头像", "壁纸"}
+	generationVerbs := []string{"生成", "做一", "设计", "创作", "制作"}
 	for _, noun := range imageNouns {
-		if strings.Contains(normalized, noun) &&
-			(strings.Contains(normalized, "生成") || strings.Contains(normalized, "做一")) {
-			return true
+		if !strings.Contains(normalized, noun) {
+			continue
+		}
+		for _, verb := range generationVerbs {
+			if strings.Contains(normalized, verb) {
+				return true
+			}
 		}
 	}
 	drawPhrases := []string{"帮我画", "给我画", "画一张", "画一幅", "画个"}
