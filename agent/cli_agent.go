@@ -3,8 +3,10 @@ package agent
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -36,6 +38,9 @@ var _ PersonaAwareAgent = (*CLIAgent)(nil)
 // var _ ModelConfigurableAgent = (*CLIAgent)(nil) guards SetModelConfig the
 // same way, for the live model-tier admin panel.
 var _ ModelConfigurableAgent = (*CLIAgent)(nil)
+
+// var _ ImageChatAgent = (*CLIAgent)(nil) guards ChatWithImage the same way.
+var _ ImageChatAgent = (*CLIAgent)(nil)
 
 // CLIAgentConfig holds configuration for a CLI agent.
 type CLIAgentConfig struct {
@@ -163,6 +168,52 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 		log.Printf("[cli] starting new conversation (command=%s, conversation=%s)", a.command, conversationID)
 	}
 
+	return a.runClaudeStreamJSON(ctx, conversationID, args, "")
+}
+
+// ChatWithImage sends an image (plus accompanying text) to claude. Unlike
+// chatClaude, the message can't go as a positional -p argument (there's
+// nowhere to attach an image to that), so this uses --input-format
+// stream-json and writes a Messages-API-style content array (text + base64
+// image) to stdin instead — see buildClaudeImageArgs/buildClaudeImageStdin,
+// both empirically verified against a real claude process (2026-07-24),
+// including --safe-mode together with --input-format stream-json.
+//
+// Callers MUST call SetPersonaOverride/SetConversationPolicy for this
+// conversationID before calling this (same as chatWithAgent already does
+// for text turns) — this method does not do it itself. Skipping that step
+// for a non-owner's first-ever message (if it happens to be an image) would
+// run claude without safe-mode and the sanitized persona, leaking the
+// owner's real CLAUDE.md — exactly the class of incident this project's
+// isolation work exists to prevent.
+func (a *CLIAgent) ChatWithImage(ctx context.Context, conversationID string, message string, image *ImageInput) (string, error) {
+	a.mu.Lock()
+	override := a.personas[conversationID]
+	sessionID, hasSession := a.sessions[conversationID]
+	model := a.model
+	a.mu.Unlock()
+
+	args := buildClaudeImageArgs(model, a.systemPrompt, a.args, override, sessionID, hasSession)
+	stdinPayload, err := buildClaudeImageStdin(message, image)
+	if err != nil {
+		return "", err
+	}
+
+	if hasSession {
+		log.Printf("[cli] resuming session for image turn (command=%s, session=%s, conversation=%s)", a.command, sessionID, conversationID)
+	} else {
+		log.Printf("[cli] starting new conversation for image turn (command=%s, conversation=%s)", a.command, conversationID)
+	}
+
+	return a.runClaudeStreamJSON(ctx, conversationID, args, stdinPayload)
+}
+
+// runClaudeStreamJSON spawns the claude CLI with args, optionally piping
+// stdinPayload to it first (used by ChatWithImage's stream-json input mode;
+// empty for chatClaude's positional -p message mode), parses the streamed
+// stream-json output into a final result, and saves any new session ID for
+// conversationID.
+func (a *CLIAgent) runClaudeStreamJSON(ctx context.Context, conversationID string, args []string, stdinPayload string) (string, error) {
 	cmd := exec.CommandContext(ctx, a.command, args...)
 	if a.cwd != "" {
 		cmd.Dir = a.cwd
@@ -182,11 +233,26 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 		return "", fmt.Errorf("create stdout pipe: %w", err)
 	}
 
+	var stdin io.WriteCloser
+	if stdinPayload != "" {
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return "", fmt.Errorf("create stdin pipe: %w", err)
+		}
+	}
+
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("start %s: %w", a.name, err)
 	}
 
 	log.Printf("[cli] spawned process (command=%s, pid=%d, conversation=%s)", a.command, cmd.Process.Pid, conversationID)
+
+	if stdin != nil {
+		go func() {
+			defer stdin.Close()
+			io.WriteString(stdin, stdinPayload)
+		}()
+	}
 
 	// Parse streaming JSON events
 	var result string
@@ -270,7 +336,26 @@ func (a *CLIAgent) chatClaude(ctx context.Context, conversationID string, messag
 // real claude process.
 func buildClaudeArgs(message, model, systemPrompt string, extraArgs []string, override PersonaOverride, sessionID string, hasSession bool) []string {
 	args := []string{"-p", message, "--output-format", "stream-json", "--verbose"}
+	return appendClaudeCommonArgs(args, model, systemPrompt, extraArgs, override, sessionID, hasSession)
+}
 
+// buildClaudeImageArgs is buildClaudeArgs for image turns: the message
+// doesn't go as a positional arg (there isn't one to attach an image to),
+// it goes over stdin as a stream-json event instead (see
+// buildClaudeImageStdin) — --input-format stream-json is what tells claude
+// to read it that way. Empirically verified against a real claude process
+// (2026-07-24): this combination, including --safe-mode together with
+// --input-format stream-json, produces a correct image-aware reply with no
+// leakage of the owner's real CLAUDE.md persona.
+func buildClaudeImageArgs(model, systemPrompt string, extraArgs []string, override PersonaOverride, sessionID string, hasSession bool) []string {
+	args := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"}
+	return appendClaudeCommonArgs(args, model, systemPrompt, extraArgs, override, sessionID, hasSession)
+}
+
+// appendClaudeCommonArgs appends the flags shared by every claude turn
+// regardless of how the message itself is delivered (positional -p arg vs
+// stdin stream-json event).
+func appendClaudeCommonArgs(args []string, model, systemPrompt string, extraArgs []string, override PersonaOverride, sessionID string, hasSession bool) []string {
 	if model != "" {
 		args = append(args, "--model", model)
 	}
@@ -296,6 +381,52 @@ func buildClaudeArgs(message, model, systemPrompt string, extraArgs []string, ov
 		args = append(args, "--resume", sessionID)
 	}
 	return args
+}
+
+// claudeImageStdinMessage is the stream-json input line shape claude reads
+// from stdin when invoked with --input-format stream-json: a "user" event
+// wrapping a Messages-API-style content array. Empirically verified against
+// a real claude process (2026-07-24) — this exact shape produced a correct
+// description of a real test image.
+type claudeImageStdinMessage struct {
+	Type    string `json:"type"`
+	Message struct {
+		Role    string                    `json:"role"`
+		Content []claudeImageContentBlock `json:"content"`
+	} `json:"message"`
+}
+
+type claudeImageContentBlock struct {
+	Type   string             `json:"type"`
+	Text   string             `json:"text,omitempty"`
+	Source *claudeImageSource `json:"source,omitempty"`
+}
+
+type claudeImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+// buildClaudeImageStdin builds the one-line NDJSON payload to write to
+// claude's stdin for an image turn: message text plus the image, base64
+// encoded. Pure function so it's testable without spawning a real process.
+func buildClaudeImageStdin(message string, image *ImageInput) (string, error) {
+	msg := claudeImageStdinMessage{Type: "user"}
+	msg.Message.Role = "user"
+	msg.Message.Content = []claudeImageContentBlock{
+		{Type: "text", Text: message},
+		{Type: "image", Source: &claudeImageSource{
+			Type:      "base64",
+			MediaType: image.MimeType,
+			Data:      base64.StdEncoding.EncodeToString(image.Data),
+		}},
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return "", fmt.Errorf("marshal claude image stdin message: %w", err)
+	}
+	return string(data) + "\n", nil
 }
 
 // chatCodex handles codex CLI invocation using "codex exec".

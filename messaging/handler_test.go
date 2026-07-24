@@ -80,6 +80,17 @@ func (a *recordingAgent) modelConfigSnapshot() (string, string) {
 	return a.model, a.reasoningEffort
 }
 
+// ChatWithImage satisfies agent.ImageChatAgent so recordingAgent can be used
+// to test handleImageMessage's dispatch — in particular, that a persona
+// override is recorded (via SetPersonaOverride) BEFORE this is called, not
+// just for ordinary text turns via chatWithAgent.
+func (a *recordingAgent) ChatWithImage(_ context.Context, conversationID string, message string, _ *agent.ImageInput) (string, error) {
+	a.mu.Lock()
+	a.calls = append(a.calls, "image:"+conversationID+":"+message)
+	a.mu.Unlock()
+	return "ok", nil
+}
+
 func (a *recordingAgent) callsSnapshot() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -1108,6 +1119,76 @@ func TestChatWithAgentSkipsPersonaOverrideForOwner(t *testing.T) {
 
 	if _, ok := fake.personaOverrideFor(ownerID); ok {
 		t.Fatal("owner conversations must not get a persona override")
+	}
+}
+
+// TestHandleImageMessageSetsPersonaOverrideBeforeChatWithImage is a
+// regression test for a real gap found while adding claude image support
+// (2026-07-24): handleImageMessage's ChatWithImage dispatch branch never
+// called SetPersonaOverride/SetConversationPolicy, unlike chatWithAgent's
+// text-turn path. For codex-shared this was masked by CODEX_HOME structural
+// isolation, but it would have been a full repeat of the original
+// production privacy incident for claude (no safe-mode, no sanitized
+// prompt) the moment a non-owner's first-ever message happened to be an
+// image.
+func TestHandleImageMessageSetsPersonaOverrideBeforeChatWithImage(t *testing.T) {
+	dir := t.TempDir()
+	if err := persona.Save(dir, persona.DefaultName, "脱敏人格文本"); err != nil {
+		t.Fatalf("persona.Save: %v", err)
+	}
+
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte{0x89, 0x50, 0x4E, 0x47, 1, 2, 3}) // minimal PNG-signature bytes
+	}))
+	defer imgSrv.Close()
+
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	h.SetPersonaDir(dir)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex-shared", fake)
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	msg := newTestMessage("non-owner-test@im.wechat", "", 1)
+	h.handleImageMessage(context.Background(), client, msg, &ilink.ImageItem{URL: imgSrv.URL})
+
+	override, ok := fake.personaOverrideFor("non-owner-test@im.wechat")
+	if !ok {
+		t.Fatal("expected a persona override to be recorded before ChatWithImage was called")
+	}
+	if override.SystemPrompt != "脱敏人格文本" {
+		t.Fatalf("override.SystemPrompt = %q, want %q", override.SystemPrompt, "脱敏人格文本")
+	}
+	calls := fake.callsSnapshot()
+	if len(calls) != 1 || !strings.HasPrefix(calls[0], "image:non-owner-test@im.wechat:") {
+		t.Fatalf("expected ChatWithImage to be called once for this conversation, got %v", calls)
+	}
+}
+
+func TestHandleImageMessageSkipsPersonaOverrideForOwner(t *testing.T) {
+	dir := t.TempDir()
+	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte{0x89, 0x50, 0x4E, 0x47, 1, 2, 3})
+	}))
+	defer imgSrv.Close()
+
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+
+	h := NewHandler(nil, nil)
+	h.SetPersonaDir(dir)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	ownerID := config.OwnerUserIDs()[0]
+	msg := newTestMessage(ownerID, "", 1)
+	h.handleImageMessage(context.Background(), client, msg, &ilink.ImageItem{URL: imgSrv.URL})
+
+	if _, ok := fake.personaOverrideFor(ownerID); ok {
+		t.Fatal("owner conversations must not get a persona override for image turns either")
 	}
 }
 

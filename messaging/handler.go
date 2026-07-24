@@ -1941,6 +1941,19 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 		return
 	}
 
+	// Same policy/persona setup chatWithAgent does for text turns — without
+	// this, a non-owner's first-ever message being an image would skip
+	// safe-mode/the sanitized persona entirely and reach the agent with the
+	// owner's real defaults (a real gap found 2026-07-24 while adding claude
+	// image support; see TestHandleImageMessageSetsPersonaOverrideBeforeChatWithImage).
+	if pa, ok := ag.(agent.PolicyAwareAgent); ok {
+		pa.SetConversationPolicy(msg.FromUserID, h.conversationPolicy(msg.FromUserID))
+	}
+	if pa, ok := ag.(agent.PersonaAwareAgent); ok && !config.IsOwner(msg.FromUserID) {
+		_, override := h.personaOverride(msg.FromUserID)
+		pa.SetPersonaOverride(msg.FromUserID, override)
+	}
+
 	var reply string
 	var elapsed time.Duration
 	if imgAgent, ok := ag.(agent.ImageChatAgent); ok {
