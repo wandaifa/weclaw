@@ -10,19 +10,19 @@ import (
 
 // Config holds the application configuration.
 type Config struct {
-	DefaultAgent    string                    `json:"default_agent"`
-	AccessMode      AccessMode                `json:"access_mode,omitempty"`
-	UserAgents      map[string]string         `json:"user_agents,omitempty"`
-	UserPermissions map[string]UserPermission `json:"user_permissions,omitempty"`
-	DefaultPersona  string                    `json:"default_persona,omitempty"`
-	UserPersonas    map[string]string         `json:"user_personas,omitempty"` // userID -> persona name
-	NonOwnerDefaultAgent     string           `json:"non_owner_default_agent,omitempty"`    // 空 = "codex-shared"
-	AllowNonOwnerAgentSwitch bool             `json:"allow_non_owner_agent_switch,omitempty"` // 默认 false
-	APIAddr         string                    `json:"api_addr,omitempty"`
-	SaveDir         string                    `json:"save_dir,omitempty"`
-	MessageMerge    MessageMergeConfig        `json:"message_merge,omitempty"`
-	MediaRetention  MediaRetentionConfig      `json:"media_retention,omitempty"`
-	Agents          map[string]AgentConfig    `json:"agents"`
+	DefaultAgent             string                    `json:"default_agent"`
+	AccessMode               AccessMode                `json:"access_mode,omitempty"`
+	UserAgents               map[string]string         `json:"user_agents,omitempty"`
+	UserPermissions          map[string]UserPermission `json:"user_permissions,omitempty"`
+	DefaultPersona           string                    `json:"default_persona,omitempty"`
+	UserPersonas             map[string]string         `json:"user_personas,omitempty"`                // userID -> persona name
+	NonOwnerDefaultAgent     string                    `json:"non_owner_default_agent,omitempty"`      // 空 = "codex-shared"
+	AllowNonOwnerAgentSwitch bool                      `json:"allow_non_owner_agent_switch,omitempty"` // 默认 false
+	APIAddr                  string                    `json:"api_addr,omitempty"`
+	SaveDir                  string                    `json:"save_dir,omitempty"`
+	MessageMerge             MessageMergeConfig        `json:"message_merge,omitempty"`
+	MediaRetention           MediaRetentionConfig      `json:"media_retention,omitempty"`
+	Agents                   map[string]AgentConfig    `json:"agents"`
 }
 
 // AccessMode gates whether a non-owner user's message reaches an agent at
@@ -149,19 +149,19 @@ func (c MediaRetentionConfig) WithDefaults() MediaRetentionConfig {
 
 // AgentConfig holds configuration for a single agent.
 type AgentConfig struct {
-	Type                 string            `json:"type"`                              // "acp", "cli", or "http"
-	Command              string            `json:"command,omitempty"`                 // binary path (cli/acp type)
-	Args                 []string          `json:"args,omitempty"`                    // extra args for command (e.g. ["acp"] for cursor)
-	Aliases              []string          `json:"aliases,omitempty"`                 // custom trigger commands (e.g. ["gpt", "4o"])
-	Cwd                  string            `json:"cwd,omitempty"`                     // working directory (workspace)
-	Env                  map[string]string `json:"env,omitempty"`                     // extra environment variables (cli/acp type)
-	Model                string            `json:"model,omitempty"`                   // model name
-	ModelReasoningEffort string            `json:"model_reasoning_effort,omitempty"`  // "none"|"low"|"medium"|"high"|"xhigh" (acp/codex only)
-	SystemPrompt         string            `json:"system_prompt,omitempty"`           // system prompt
-	Endpoint             string            `json:"endpoint,omitempty"`                // API endpoint (http type)
-	APIKey               string            `json:"api_key,omitempty"`                 // API key (http type)
-	Headers              map[string]string `json:"headers,omitempty"`                 // extra HTTP headers (http type)
-	MaxHistory           int               `json:"max_history,omitempty"`             // max history (http type)
+	Type                 string            `json:"type"`                             // "acp", "cli", or "http"
+	Command              string            `json:"command,omitempty"`                // binary path (cli/acp type)
+	Args                 []string          `json:"args,omitempty"`                   // extra args for command (e.g. ["acp"] for cursor)
+	Aliases              []string          `json:"aliases,omitempty"`                // custom trigger commands (e.g. ["gpt", "4o"])
+	Cwd                  string            `json:"cwd,omitempty"`                    // working directory (workspace)
+	Env                  map[string]string `json:"env,omitempty"`                    // extra environment variables (cli/acp type)
+	Model                string            `json:"model,omitempty"`                  // model name
+	ModelReasoningEffort string            `json:"model_reasoning_effort,omitempty"` // "none"|"low"|"medium"|"high"|"xhigh" (acp/codex only)
+	SystemPrompt         string            `json:"system_prompt,omitempty"`          // system prompt
+	Endpoint             string            `json:"endpoint,omitempty"`               // API endpoint (http type)
+	APIKey               string            `json:"api_key,omitempty"`                // API key (http type)
+	Headers              map[string]string `json:"headers,omitempty"`                // extra HTTP headers (http type)
+	MaxHistory           int               `json:"max_history,omitempty"`            // max history (http type)
 }
 
 // BuildAliasMap builds a map from custom alias to agent name from all agent configs.
