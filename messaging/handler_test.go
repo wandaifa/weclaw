@@ -35,6 +35,8 @@ type recordingAgent struct {
 	mu               sync.Mutex
 	calls            []string
 	personaOverrides map[string]agent.PersonaOverride
+	model            string
+	reasoningEffort  string
 }
 
 func (a *recordingAgent) Chat(_ context.Context, _ string, message string) (string, error) {
@@ -63,6 +65,19 @@ func (a *recordingAgent) personaOverrideFor(conversationID string) (agent.Person
 	defer a.mu.Unlock()
 	override, ok := a.personaOverrides[conversationID]
 	return override, ok
+}
+
+func (a *recordingAgent) SetModelConfig(model, reasoningEffort string) {
+	a.mu.Lock()
+	a.model = model
+	a.reasoningEffort = reasoningEffort
+	a.mu.Unlock()
+}
+
+func (a *recordingAgent) modelConfigSnapshot() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.model, a.reasoningEffort
 }
 
 func (a *recordingAgent) callsSnapshot() []string {
@@ -430,6 +445,53 @@ func TestSelectedAgentHonorsConfiguredNonOwnerDefaultAgent(t *testing.T) {
 	h.SetNonOwnerDefaultAgent("claude")
 	if name, _, selected := h.selectedAgent("user-x"); name != "claude" || !selected {
 		t.Fatalf("selectedAgent(non-owner) = (%q, selected=%v), want (\"claude\", true) after SetNonOwnerDefaultAgent(\"claude\")", name, selected)
+	}
+}
+
+// nonConfigurableAgent implements agent.Agent but not
+// agent.ModelConfigurableAgent, like claude's CLIAgent (which reads its
+// model fresh on every spawn and has no live-reconfiguration method).
+type nonConfigurableAgent struct{}
+
+func (a *nonConfigurableAgent) Chat(_ context.Context, _ string, _ string) (string, error) {
+	return "ok", nil
+}
+func (a *nonConfigurableAgent) ResetSession(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+func (a *nonConfigurableAgent) Info() agent.AgentInfo {
+	return agent.AgentInfo{Name: "fake-claude", Type: "fake"}
+}
+func (a *nonConfigurableAgent) SetCwd(string) {}
+
+func TestSetAgentModelConfigUpdatesRunningAgent(t *testing.T) {
+	h := newTestHandler()
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex-shared", fake)
+
+	if err := h.SetAgentModelConfig("codex-shared", "gpt-5.1-mini", "low"); err != nil {
+		t.Fatalf("SetAgentModelConfig: %v", err)
+	}
+
+	model, effort := fake.modelConfigSnapshot()
+	if model != "gpt-5.1-mini" || effort != "low" {
+		t.Fatalf("model/effort = %q/%q, want gpt-5.1-mini/low", model, effort)
+	}
+}
+
+func TestSetAgentModelConfigIsNoOpWhenAgentNotRunning(t *testing.T) {
+	h := newTestHandler()
+	if err := h.SetAgentModelConfig("codex-shared", "gpt-5.1-mini", "low"); err != nil {
+		t.Fatalf("SetAgentModelConfig should not error when the agent isn't running yet (config.json alone applies on next start): %v", err)
+	}
+}
+
+func TestSetAgentModelConfigErrorsForUnsupportedAgentType(t *testing.T) {
+	h := newTestHandler()
+	h.SetDefaultAgent("claude", &nonConfigurableAgent{})
+
+	if err := h.SetAgentModelConfig("claude", "sonnet", ""); err == nil {
+		t.Fatal("SetAgentModelConfig should error for an agent that doesn't implement ModelConfigurableAgent")
 	}
 }
 

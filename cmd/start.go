@@ -355,6 +355,36 @@ func runStart(cmd *cobra.Command, args []string) error {
 		handler.SetAllowNonOwnerAgentSwitch(settings.AllowSwitch)
 		return settings, nil
 	})
+	apiServer.SetCodexSharedModelProvider(func() api.CodexSharedModelSettings {
+		configMu.Lock()
+		defer configMu.Unlock()
+		agCfg := cfg.Agents["codex-shared"]
+		return api.CodexSharedModelSettings{Model: agCfg.Model, ModelReasoningEffort: agCfg.ModelReasoningEffort}
+	})
+	apiServer.SetCodexSharedModelController(func(_ context.Context, settings api.CodexSharedModelSettings) (api.CodexSharedModelSettings, error) {
+		validEfforts := map[string]bool{"": true, "none": true, "low": true, "medium": true, "high": true, "xhigh": true}
+		if !validEfforts[settings.ModelReasoningEffort] {
+			return api.CodexSharedModelSettings{}, fmt.Errorf("model_reasoning_effort must be one of none/low/medium/high/xhigh (or empty), got %q", settings.ModelReasoningEffort)
+		}
+		configMu.Lock()
+		agCfg, ok := cfg.Agents["codex-shared"]
+		if !ok {
+			configMu.Unlock()
+			return api.CodexSharedModelSettings{}, fmt.Errorf("codex-shared agent is not configured")
+		}
+		agCfg.Model = settings.Model
+		agCfg.ModelReasoningEffort = settings.ModelReasoningEffort
+		cfg.Agents["codex-shared"] = agCfg
+		saveErr := config.Save(cfg)
+		configMu.Unlock()
+		if saveErr != nil {
+			return api.CodexSharedModelSettings{}, saveErr
+		}
+		if err := handler.SetAgentModelConfig("codex-shared", settings.Model, settings.ModelReasoningEffort); err != nil {
+			return api.CodexSharedModelSettings{}, err
+		}
+		return settings, nil
+	})
 	apiServer.SetPermissionsProvider(func() []api.UserPermissionInfo {
 		infos := make([]api.UserPermissionInfo, 0)
 		for _, ownerID := range config.OwnerUserIDs() {

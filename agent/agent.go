@@ -172,6 +172,16 @@ type PersonaAwareAgent interface {
 	SetPersonaOverride(conversationID string, override PersonaOverride)
 }
 
+// ModelConfigurableAgent is implemented by agents whose model tier and
+// reasoning effort can be changed live (without restarting the process),
+// e.g. from the 18022 admin panel. Callers should type-assert for it rather
+// than adding it to the base Agent interface, since the CLI agent (claude)
+// reads its model fresh on every spawn and has no equivalent need for this.
+type ModelConfigurableAgent interface {
+	Agent
+	SetModelConfig(model, reasoningEffort string)
+}
+
 // ImageInput holds image data for multimodal chat.
 type ImageInput struct {
 	MimeType string

@@ -571,3 +571,51 @@ func TestHandleNonOwnerRoutingRejectsNonLoopback(t *testing.T) {
 		t.Fatal("controller should not be called for a non-loopback request")
 	}
 }
+
+func TestHandleCodexSharedModelReadsAndUpdates(t *testing.T) {
+	stored := CodexSharedModelSettings{Model: "", ModelReasoningEffort: ""}
+	server := NewServer(nil, "")
+	server.SetCodexSharedModelProvider(func() CodexSharedModelSettings { return stored })
+	server.SetCodexSharedModelController(func(_ context.Context, s CodexSharedModelSettings) (CodexSharedModelSettings, error) {
+		stored = s
+		return stored, nil
+	})
+
+	get := httptest.NewRequest(http.MethodGet, CodexSharedModelPath, nil)
+	get.RemoteAddr = "127.0.0.1:12345"
+	getResp := httptest.NewRecorder()
+	server.handleCodexSharedModel(getResp, get)
+	if getResp.Code != http.StatusOK {
+		t.Fatalf("GET = %d %s", getResp.Code, getResp.Body.String())
+	}
+
+	post := httptest.NewRequest(http.MethodPost, CodexSharedModelPath, bytes.NewBufferString(`{"model":"gpt-5.1-mini","model_reasoning_effort":"low"}`))
+	post.RemoteAddr = "127.0.0.1:12345"
+	postResp := httptest.NewRecorder()
+	server.handleCodexSharedModel(postResp, post)
+	if postResp.Code != http.StatusOK {
+		t.Fatalf("POST = %d %s", postResp.Code, postResp.Body.String())
+	}
+	if stored.Model != "gpt-5.1-mini" || stored.ModelReasoningEffort != "low" {
+		t.Fatalf("stored = %+v", stored)
+	}
+}
+
+func TestHandleCodexSharedModelRejectsNonLoopback(t *testing.T) {
+	called := false
+	server := NewServer(nil, "")
+	server.SetCodexSharedModelController(func(_ context.Context, s CodexSharedModelSettings) (CodexSharedModelSettings, error) {
+		called = true
+		return s, nil
+	})
+	req := httptest.NewRequest(http.MethodPost, CodexSharedModelPath, bytes.NewBufferString(`{}`))
+	req.RemoteAddr = "192.0.2.1:12345"
+	resp := httptest.NewRecorder()
+	server.handleCodexSharedModel(resp, req)
+	if resp.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", resp.Code)
+	}
+	if called {
+		t.Fatal("controller should not be called for a non-loopback request")
+	}
+}

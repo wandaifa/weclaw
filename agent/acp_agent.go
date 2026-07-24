@@ -401,6 +401,27 @@ func (a *ACPAgent) SetPersonaOverride(conversationID string, override PersonaOve
 	delete(a.sessions, conversationID)
 }
 
+// SetModelConfig updates the model tier and reasoning effort this agent
+// uses for future conversations (e.g. codex-shared's non-owner model tier,
+// changed live from the 18022 admin panel). Unlike SetPersonaOverride/
+// SetConversationPolicy, which invalidate a single conversationID, this
+// invalidates every cached thread/session: codex binds a thread's model at
+// thread/start time, and the change affects all future turns, not just one
+// conversation. Already-in-flight turns are unaffected; every conversation
+// picks up the new model on its next turn, when it re-does thread/start.
+func (a *ACPAgent) SetModelConfig(model, reasoningEffort string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.model == model && a.modelReasoningEffort == reasoningEffort {
+		return
+	}
+	a.model = model
+	a.modelReasoningEffort = reasoningEffort
+	a.threads = make(map[string]string)
+	a.sessions = make(map[string]string)
+	a.sessionOwners = make(map[string]string)
+}
+
 // effectivePolicy returns the policy for conversationID, defaulting to the
 // most restrictive tier (fail-closed) if none was ever set. Callers must
 // hold a.mu.

@@ -517,6 +517,29 @@ func (h *Handler) AllowNonOwnerAgentSwitch() bool {
 	return h.allowNonOwnerSwitch
 }
 
+// SetAgentModelConfig updates the live model tier/reasoning effort for a
+// currently-running agent that supports it (see agent.ModelConfigurableAgent
+// — codex-shared is the intended caller, changed from the 18022 admin
+// panel). If the named agent isn't running yet, this is a no-op and returns
+// nil: callers are expected to also persist the value to config.json, which
+// alone determines the model the next time that agent starts. Returns an
+// error only if the agent IS running but doesn't support live model
+// reconfiguration (e.g. claude, which reads its model fresh per spawn).
+func (h *Handler) SetAgentModelConfig(agentName, model, reasoningEffort string) error {
+	h.mu.RLock()
+	ag, ok := h.agents[agentName]
+	h.mu.RUnlock()
+	if !ok {
+		return nil
+	}
+	configurable, ok := ag.(agent.ModelConfigurableAgent)
+	if !ok {
+		return fmt.Errorf("agent %q does not support live model reconfiguration", agentName)
+	}
+	configurable.SetModelConfig(model, reasoningEffort)
+	return nil
+}
+
 // nonOwnerSwitchTarget resolves a non-owner's literal "/claude" or "/codex"
 // prefix to the actual agent name they're allowed to reach. Deliberately a
 // separate, narrow resolver from resolveAlias/agentAliases (the owner's
