@@ -727,6 +727,7 @@ func TestNonOwnerAgentSwitchPrefixIsPlainText(t *testing.T) {
 	h.HandleMessage(context.Background(), client, msg)
 
 	waitFor(t, 2*time.Second, func() bool { return len(fake.callsSnapshot()) > 0 })
+	h.waitForIdle()
 	calls := fake.callsSnapshot()
 	if len(calls) != 1 || calls[0] != "/codex hello" {
 		t.Fatalf("non-owner /codex text should reach the default agent verbatim, got %v", calls)
@@ -747,6 +748,7 @@ func TestNonOwnerCwdIsPlainText(t *testing.T) {
 	h.HandleMessage(context.Background(), client, msg)
 
 	waitFor(t, 2*time.Second, func() bool { return len(fake.callsSnapshot()) > 0 })
+	h.waitForIdle()
 	calls := fake.callsSnapshot()
 	if len(calls) != 1 || calls[0] != "/cwd /tmp/should-not-apply" {
 		t.Fatalf("non-owner /cwd should be forwarded as plain text, got %v", calls)
@@ -772,6 +774,7 @@ func TestOwnerCwdStillWorks(t *testing.T) {
 		defer h.mu.RUnlock()
 		return h.agentWorkDirs["codex"] == dir
 	})
+	h.waitForIdle()
 	if len(fake.callsSnapshot()) != 0 {
 		t.Fatalf("owner /cwd should not be forwarded to the agent, got %v", fake.callsSnapshot())
 	}
@@ -799,6 +802,7 @@ func TestQuotaExceededBlocksNonOwnerBeforeAgentCall(t *testing.T) {
 
 	h.HandleMessage(context.Background(), client, newTestMessage("quota-test@im.wechat", "second", 11))
 	waitFor(t, 4*time.Second, func() bool { return len(sent.snapshot()) >= 2 })
+	h.waitForIdle()
 
 	if calls := fake.callsSnapshot(); len(calls) != 1 {
 		t.Fatalf("second message should not reach the agent once quota is exhausted, got calls=%v", calls)
@@ -969,6 +973,7 @@ func TestAccessGateRefusesBeforeAgentCallInOwnerOnlyMode(t *testing.T) {
 	h.HandleMessage(context.Background(), client, newTestMessage("stranger@im.wechat", "hello", 20))
 
 	waitFor(t, 4*time.Second, func() bool { return len(sent.snapshot()) >= 1 })
+	h.waitForIdle()
 	if calls := fake.callsSnapshot(); len(calls) != 0 {
 		t.Fatalf("owner_only mode should never let a stranger's message reach the agent, got calls=%v", calls)
 	}
@@ -1027,6 +1032,7 @@ func TestAccessGateDoesNotBlockOwnerRegardlessOfMode(t *testing.T) {
 	h.HandleMessage(context.Background(), client, newTestMessage(ownerID, "hello", 21))
 
 	waitFor(t, 4*time.Second, func() bool { return len(fake.callsSnapshot()) == 1 })
+	h.waitForIdle()
 }
 
 func TestPersonaOverrideResolutionPriority(t *testing.T) {
@@ -1121,6 +1127,7 @@ func TestNonOwnerCodexCommandResolvesToCodexSharedNotRealCodex(t *testing.T) {
 	h.HandleMessage(context.Background(), client, msg)
 
 	waitFor(t, 2*time.Second, func() bool { return len(fakeShared.callsSnapshot()) > 0 || len(fakeReal.callsSnapshot()) > 0 })
+	h.waitForIdle()
 	if calls := fakeReal.callsSnapshot(); len(calls) != 0 {
 		t.Fatalf("non-owner /codex must never reach the real codex agent, got calls=%v", calls)
 	}
@@ -1143,6 +1150,7 @@ func TestNonOwnerBareCodexSwitchReplyDoesNotLeakInternalName(t *testing.T) {
 	h.HandleMessage(context.Background(), client, msg)
 
 	waitFor(t, 2*time.Second, func() bool { return len(sent.snapshot()) > 0 })
+	h.waitForIdle()
 	texts := sent.snapshot()
 	if len(texts) != 1 {
 		t.Fatalf("expected exactly one reply, got %v", texts)
@@ -1170,6 +1178,7 @@ func TestNonOwnerAgentSwitchDisabledByDefaultTreatsSlashCodexAsPlainText(t *test
 	h.HandleMessage(context.Background(), client, msg)
 
 	waitFor(t, 2*time.Second, func() bool { return len(fake.callsSnapshot()) > 0 })
+	h.waitForIdle()
 	calls := fake.callsSnapshot()
 	if len(calls) != 1 || calls[0] != "/codex 你好" {
 		t.Fatalf("with switching disabled, /codex should reach the default agent verbatim as plain text, got %v", calls)
@@ -1191,6 +1200,7 @@ func TestOwnerCodexCommandStillResolvesToRealCodex(t *testing.T) {
 	h.HandleMessage(context.Background(), client, msg)
 
 	waitFor(t, 2*time.Second, func() bool { return len(fakeReal.callsSnapshot()) > 0 })
+	h.waitForIdle()
 	if calls := fakeReal.callsSnapshot(); len(calls) != 1 || calls[0] != "你好" {
 		t.Fatalf("owner /codex should still reach the real codex agent, got %v", calls)
 	}

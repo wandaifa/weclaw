@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/store"
 )
@@ -22,6 +23,44 @@ func withTestStore(t *testing.T) *store.Store {
 		s.Close()
 	})
 	return s
+}
+
+// TestHandleMessageWaitForIdleWaitsForPersistToComplete is a regression test
+// for a real data race (found via `go test -race`): HandleMessage dispatches
+// onto an async per-conversation queue (enqueueChat/runChatQueue) and
+// returns immediately, well before the queued job's SendTextReply call (and
+// therefore persistMessage) has actually run. Tests that used to poll for an
+// early, OBSERVABLE side effect (e.g. a fake ilink server recording the sent
+// text) could see that condition become true and return before persistMessage
+// -- which runs after the network call inside the SAME goroutine -- had
+// actually executed. If some OTHER test's withTestStore() then reassigned
+// the global messageStore while that straggler goroutine was still running,
+// -race caught concurrent read/write. waitForIdle() drains the actual
+// runChatQueue goroutine (via Handler.chatWG), so no polling/guessing is
+// needed: immediately after it returns, every enqueued job -- including its
+// persistMessage call -- is guaranteed complete.
+func TestHandleMessageWaitForIdleWaitsForPersistToComplete(t *testing.T) {
+	srv, _ := newFakeIlinkServer(t)
+	defer srv.Close()
+	s := withTestStore(t)
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	ownerID := config.OwnerUserIDs()[0]
+	msg := newTestMessage(ownerID, "hello", 1)
+	h.HandleMessage(context.Background(), client, msg)
+	h.waitForIdle()
+
+	got, err := s.RecentMessages(context.Background(), 2)
+	if err != nil {
+		t.Fatalf("RecentMessages: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d messages immediately after waitForIdle, want 2 (the user message and the agent's reply) with no polling needed: %+v", len(got), got)
+	}
 }
 
 func TestSendTextReplyPersistsAgentReply(t *testing.T) {

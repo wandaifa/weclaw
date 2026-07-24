@@ -52,12 +52,13 @@ type Handler struct {
 	customAliases       map[string]string                // custom alias -> agent name (from config)
 	factory             AgentFactory
 	saveUserAgent       SaveUserAgentFunc
-	contextTokens       sync.Map // map[userID]contextToken
-	saveDir             string   // directory to save images/files to
-	seenMsgs            sync.Map // map[int64]time.Time — dedup by message_id
-	pendingMedia        sync.Map // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
-	activeChats         sync.Map // map[userID]time.Time — prevent overlapping turns across agents for one user
-	chatQueues          sync.Map // map[botID+userID]*chatQueue — serializes one conversation's turns
+	contextTokens       sync.Map       // map[userID]contextToken
+	saveDir             string         // directory to save images/files to
+	seenMsgs            sync.Map       // map[int64]time.Time — dedup by message_id
+	pendingMedia        sync.Map       // map[userID][]pendingMedia — inbound files/videos waiting for a text instruction
+	activeChats         sync.Map       // map[userID]time.Time — prevent overlapping turns across agents for one user
+	chatQueues          sync.Map       // map[botID+userID]*chatQueue — serializes one conversation's turns
+	chatWG              sync.WaitGroup // tracks in-flight runChatQueue goroutines; see waitForIdle
 	mergeMu             sync.RWMutex
 	mergeSettings       MergeSettings
 	usageMu             sync.Mutex
@@ -768,11 +769,21 @@ func (h *Handler) enqueueChat(key string, job chatJob) (queued, notifyOverload b
 		return true, false
 	}
 	queue.running = true
+	h.chatWG.Add(1)
 	go h.runChatQueue(queue)
 	return true, false
 }
 
+// waitForIdle blocks until every in-flight runChatQueue goroutine has
+// finished — including the queued job's full handling chain (persistMessage
+// included). Test-only: production code fires and forgets these goroutines
+// by design, since a WeChat reply doesn't need anyone to wait for it.
+func (h *Handler) waitForIdle() {
+	h.chatWG.Wait()
+}
+
 func (h *Handler) runChatQueue(queue *chatQueue) {
+	defer h.chatWG.Done()
 	for {
 		queue.mu.Lock()
 		if len(queue.jobs) == 0 {
