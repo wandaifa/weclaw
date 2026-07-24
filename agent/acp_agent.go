@@ -20,13 +20,14 @@ import (
 
 // ACPAgent communicates with ACP-compatible agents (claude-agent-acp, codex-acp, cursor agent, etc.) via stdio JSON-RPC 2.0.
 type ACPAgent struct {
-	command      string
-	args         []string
-	model        string
-	systemPrompt string
-	cwd          string
-	env          map[string]string
-	protocol     string // "legacy_acp" or "codex_app_server"
+	command              string
+	args                 []string
+	model                string
+	modelReasoningEffort string
+	systemPrompt         string
+	cwd                  string
+	env                  map[string]string
+	protocol             string // "legacy_acp" or "codex_app_server"
 
 	mu            sync.Mutex
 	cmd           *exec.Cmd
@@ -57,12 +58,13 @@ type ACPAgent struct {
 
 // ACPAgentConfig holds configuration for the ACP agent.
 type ACPAgentConfig struct {
-	Command      string   // path to ACP agent binary (claude-agent-acp, codex-acp, cursor agent, etc.)
-	Args         []string // extra args for command (e.g. ["acp"] for cursor)
-	Model        string
-	SystemPrompt string
-	Cwd          string            // working directory
-	Env          map[string]string // extra environment variables
+	Command              string   // path to ACP agent binary (claude-agent-acp, codex-acp, cursor agent, etc.)
+	Args                 []string // extra args for command (e.g. ["acp"] for cursor)
+	Model                string
+	ModelReasoningEffort string
+	SystemPrompt         string
+	Cwd                  string            // working directory
+	Env                  map[string]string // extra environment variables
 }
 
 // --- JSON-RPC types ---
@@ -207,21 +209,22 @@ func NewACPAgent(cfg ACPAgentConfig) *ACPAgent {
 	}
 	protocol := detectACPProtocol(cfg.Command, cfg.Args)
 	return &ACPAgent{
-		command:       cfg.Command,
-		args:          cfg.Args,
-		model:         cfg.Model,
-		systemPrompt:  cfg.SystemPrompt,
-		cwd:           cfg.Cwd,
-		env:           cfg.Env,
-		protocol:      protocol,
-		sessions:      make(map[string]string),
-		sessionOwners: make(map[string]string),
-		threads:       make(map[string]string),
-		policies:      make(map[string]ConversationPolicy),
-		personas:      make(map[string]PersonaOverride),
-		pending:       make(map[int64]chan *rpcResponse),
-		notifyCh:      make(map[string]chan *sessionUpdate),
-		turnCh:        make(map[string]chan *codexTurnEvent),
+		command:              cfg.Command,
+		args:                 cfg.Args,
+		model:                cfg.Model,
+		modelReasoningEffort: cfg.ModelReasoningEffort,
+		systemPrompt:         cfg.SystemPrompt,
+		cwd:                  cfg.Cwd,
+		env:                  cfg.Env,
+		protocol:             protocol,
+		sessions:             make(map[string]string),
+		sessionOwners:        make(map[string]string),
+		threads:              make(map[string]string),
+		policies:             make(map[string]ConversationPolicy),
+		personas:             make(map[string]PersonaOverride),
+		pending:              make(map[int64]chan *rpcResponse),
+		notifyCh:             make(map[string]chan *sessionUpdate),
+		turnCh:               make(map[string]chan *codexTurnEvent),
 	}
 }
 
@@ -761,6 +764,9 @@ func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string)
 	}
 	if a.model != "" {
 		params["model"] = a.model
+	}
+	if a.modelReasoningEffort != "" {
+		params["config"] = map[string]interface{}{"model_reasoning_effort": a.modelReasoningEffort}
 	}
 	if override.SystemPrompt != "" {
 		params["baseInstructions"] = override.SystemPrompt

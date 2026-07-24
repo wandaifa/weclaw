@@ -225,6 +225,51 @@ func TestGetOrCreateThreadAppliesConversationPolicy(t *testing.T) {
 	}
 }
 
+func TestGetOrCreateThreadIncludesModelReasoningEffortWhenConfigured(t *testing.T) {
+	var capturedParams map[string]interface{}
+	a := NewACPAgent(ACPAgentConfig{Command: "codex", ModelReasoningEffort: "low"})
+	a.rpcCall = func(_ context.Context, method string, params interface{}) (json.RawMessage, error) {
+		if method == "thread/start" {
+			b, _ := json.Marshal(params)
+			json.Unmarshal(b, &capturedParams)
+			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
+		}
+		return json.RawMessage(`{}`), nil
+	}
+
+	if _, _, err := a.getOrCreateThread(context.Background(), "user-a"); err != nil {
+		t.Fatalf("getOrCreateThread: %v", err)
+	}
+
+	cfg, ok := capturedParams["config"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("thread/start params missing config object, got %+v", capturedParams)
+	}
+	if cfg["model_reasoning_effort"] != "low" {
+		t.Fatalf("config.model_reasoning_effort = %v, want %q", cfg["model_reasoning_effort"], "low")
+	}
+}
+
+func TestGetOrCreateThreadOmitsConfigWhenReasoningEffortNotSet(t *testing.T) {
+	var capturedParams map[string]interface{}
+	a := NewACPAgent(ACPAgentConfig{Command: "codex"})
+	a.rpcCall = func(_ context.Context, method string, params interface{}) (json.RawMessage, error) {
+		if method == "thread/start" {
+			b, _ := json.Marshal(params)
+			json.Unmarshal(b, &capturedParams)
+			return json.RawMessage(`{"thread":{"id":"thread-1"}}`), nil
+		}
+		return json.RawMessage(`{}`), nil
+	}
+
+	if _, _, err := a.getOrCreateThread(context.Background(), "user-a"); err != nil {
+		t.Fatalf("getOrCreateThread: %v", err)
+	}
+	if _, ok := capturedParams["config"]; ok {
+		t.Fatalf("thread/start params should not have a config object when ModelReasoningEffort is unset, got %+v", capturedParams)
+	}
+}
+
 func TestAppendNewCodexGeneratedImages(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
