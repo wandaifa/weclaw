@@ -440,6 +440,10 @@ func TestClaudeImageGenerationRedirect(t *testing.T) {
 		"帮我画一只猫",
 		"generate an image of a cat",
 		"帮我设计一张美女在天安门跳舞的图片", // real production miss: "设计" wasn't in the verb list
+		"帮我设计一个logo",
+		"画一下产品在货架上的场景",
+		"帮我做一张海报",
+		"做个表情包",
 	}
 	for _, request := range requests {
 		if !shouldRedirectClaudeImageGeneration("claude", request) {
@@ -480,12 +484,56 @@ func TestNudgeParamsForUsesShorterThresholdForImageGeneration(t *testing.T) {
 }
 
 func TestNudgeParamsForUsesGenericThresholdForOrdinaryMessages(t *testing.T) {
-	threshold, text := nudgeParamsFor("今天天气怎么样")
-	if threshold != stillWorkingThreshold {
-		t.Fatalf("threshold = %v, want the generic stillWorkingThreshold (%v)", threshold, stillWorkingThreshold)
+	requests := []string{
+		"今天天气怎么样",
+		"帮我分析一下这句话什么意思", // 分析/整理/总结 alone must not trigger the long-running category
+		"帮我整理一下这几个字",
+		"帮我总结一下",
 	}
-	if text != stillWorkingReply() {
-		t.Fatalf("text = %q, want the generic nudge text", text)
+	for _, request := range requests {
+		threshold, text := nudgeParamsFor(request)
+		if threshold != stillWorkingThreshold {
+			t.Fatalf("nudgeParamsFor(%q) threshold = %v, want the generic stillWorkingThreshold (%v)", request, threshold, stillWorkingThreshold)
+		}
+		if text != stillWorkingReply() {
+			t.Fatalf("nudgeParamsFor(%q) text = %q, want the generic nudge text", request, text)
+		}
+	}
+}
+
+func TestNudgeParamsForUsesMiddleThresholdForOtherSlowRequests(t *testing.T) {
+	requests := []string{
+		"帮我联网搜索一下最新的行业政策",
+		"帮我搜索一下这个品牌的口碑",
+		"帮我写一份详细的运营方案",
+		"帮我生成一份报告",
+		"帮我做一份深度调研",
+	}
+	for _, request := range requests {
+		threshold, text := nudgeParamsFor(request)
+		if threshold != longRunningNudgeThreshold {
+			t.Fatalf("nudgeParamsFor(%q) threshold = %v, want longRunningNudgeThreshold (%v)", request, threshold, longRunningNudgeThreshold)
+		}
+		if text != longRunningStillWorkingReply() {
+			t.Fatalf("nudgeParamsFor(%q) text = %q, want the long-running nudge text", request, text)
+		}
+		if threshold <= imageGenerationNudgeThreshold || threshold >= stillWorkingThreshold {
+			t.Fatalf("long-running threshold (%v) should sit between image-generation (%v) and generic (%v)", threshold, imageGenerationNudgeThreshold, stillWorkingThreshold)
+		}
+	}
+}
+
+func TestIsLikelyLongRunningRequestDoesNotMisfireOnQuickQuestions(t *testing.T) {
+	requests := []string{
+		"帮我分析一下这段话",
+		"帮我整理一下这个列表",
+		"帮我总结一下刚才说的",
+		"今天天气怎么样",
+	}
+	for _, request := range requests {
+		if isLikelyLongRunningRequest(request) {
+			t.Fatalf("isLikelyLongRunningRequest(%q) = true, want false for an ordinary quick question", request)
+		}
 	}
 }
 

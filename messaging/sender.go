@@ -56,12 +56,23 @@ const stillWorkingThreshold = 20 * time.Second
 // more specific nudge instead.
 const imageGenerationNudgeThreshold = 5 * time.Second
 
+// longRunningNudgeThreshold covers other known-slow request types besides
+// image generation (web search, deep research, long-form writing) — usually
+// faster than image generation but still slower than an ordinary chat
+// reply, so it sits between imageGenerationNudgeThreshold and
+// stillWorkingThreshold.
+const longRunningNudgeThreshold = 10 * time.Second
+
 func stillWorkingReply() string {
 	return "还在处理中，请稍等…"
 }
 
 func imageGenerationStillWorkingReply() string {
 	return "收到，正在生成图片，预计需要 1-2 分钟，请稍等~"
+}
+
+func longRunningStillWorkingReply() string {
+	return "收到，这个请求需要多花点时间处理，请稍等~"
 }
 
 // withTypingRefresh runs work() while periodically refreshing the typing

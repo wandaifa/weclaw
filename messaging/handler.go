@@ -1141,7 +1141,35 @@ func nudgeParamsFor(message string) (time.Duration, string) {
 	if isLikelyImageGenerationRequest(message) {
 		return imageGenerationNudgeThreshold, imageGenerationStillWorkingReply()
 	}
+	if isLikelyLongRunningRequest(message) {
+		return longRunningNudgeThreshold, longRunningStillWorkingReply()
+	}
 	return stillWorkingThreshold, stillWorkingReply()
+}
+
+// isLikelyLongRunningRequest heuristically detects other known-slow request
+// types besides image generation: web search / live lookups and long-form
+// writing (reports, plans, deep research) both routinely take longer than
+// an ordinary chat reply because they involve multiple tool calls or a lot
+// of generated content. Deliberately uses multi-character compound phrases
+// rather than single generic verbs (分析/整理/总结 etc. are used constantly
+// for both fast and slow requests, so matching on those alone would
+// misfire on quick questions).
+func isLikelyLongRunningRequest(text string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(text))
+	phrases := []string{
+		"联网搜索", "帮我搜索", "帮我查一下", "上网查", "搜一下最新",
+		"深度研究", "深度调研", "做一份调研",
+		"写一份报告", "写一份方案", "写一篇报告", "写一篇方案",
+		"生成一份报告", "生成一份方案", "整理一份报告", "整理一份方案",
+		"写一份详细", "写一份完整", "详细分析一下并", "帮我做一份",
+	}
+	for _, phrase := range phrases {
+		if strings.Contains(normalized, phrase) {
+			return true
+		}
+	}
+	return false
 }
 
 // isLikelyImageGenerationRequest heuristically detects a request to
@@ -1162,8 +1190,11 @@ func isLikelyImageGenerationRequest(text string) bool {
 	if strings.Contains(normalized, "生图") {
 		return true
 	}
-	imageNouns := []string{"图", "照片", "海报", "插画", "头像", "壁纸"}
-	generationVerbs := []string{"生成", "做一", "设计", "创作", "制作"}
+	imageNouns := []string{
+		"图", "照片", "海报", "插画", "插图", "头像", "壁纸",
+		"表情包", "漫画", "封面", "图标", "logo", "配图", "banner",
+	}
+	generationVerbs := []string{"生成", "做一", "做个", "设计", "创作", "制作", "绘制"}
 	for _, noun := range imageNouns {
 		if !strings.Contains(normalized, noun) {
 			continue
@@ -1174,7 +1205,10 @@ func isLikelyImageGenerationRequest(text string) bool {
 			}
 		}
 	}
-	drawPhrases := []string{"帮我画", "给我画", "画一张", "画一幅", "画个"}
+	drawPhrases := []string{
+		"帮我画", "给我画", "画一张", "画一幅", "画个", "画一下",
+		"出一张图", "来一张图", "弄一张图", "整一张图", "配一张图",
+	}
 	for _, phrase := range drawPhrases {
 		if strings.Contains(normalized, phrase) {
 			return true
