@@ -38,6 +38,7 @@ type ACPAgent struct {
 	sessionOwners map[string]string             // sessionID -> conversationID (legacy ACP), for policy lookups on permission requests
 	threads       map[string]string             // conversationID -> threadID (codex app-server)
 	policies      map[string]ConversationPolicy // conversationID -> sandbox tier
+	personas      map[string]PersonaOverride    // conversationID -> persona override (codex app-server only)
 
 	// pending tracks in-flight JSON-RPC requests
 	pendingMu sync.Mutex
@@ -217,6 +218,7 @@ func NewACPAgent(cfg ACPAgentConfig) *ACPAgent {
 		sessionOwners: make(map[string]string),
 		threads:       make(map[string]string),
 		policies:      make(map[string]ConversationPolicy),
+		personas:      make(map[string]PersonaOverride),
 		pending:       make(map[int64]chan *rpcResponse),
 		notifyCh:      make(map[string]chan *sessionUpdate),
 		turnCh:        make(map[string]chan *codexTurnEvent),
@@ -353,6 +355,26 @@ func (a *ACPAgent) SetConversationPolicy(conversationID string, policy Conversat
 		return
 	}
 	a.policies[conversationID] = policy
+	delete(a.threads, conversationID)
+	if oldSessionID, ok := a.sessions[conversationID]; ok {
+		delete(a.sessionOwners, oldSessionID)
+	}
+	delete(a.sessions, conversationID)
+}
+
+// SetPersonaOverride records the persona override for one conversationID.
+// Like SetConversationPolicy, codex ties baseInstructions to a thread at
+// creation time, so a change invalidates the cached thread/session for that
+// conversation to force a rebuild with the new baseInstructions on the next
+// turn — persona rebinds take effect on the very next message, not just on
+// a brand-new conversation.
+func (a *ACPAgent) SetPersonaOverride(conversationID string, override PersonaOverride) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if old, ok := a.personas[conversationID]; ok && old == override {
+		return
+	}
+	a.personas[conversationID] = override
 	delete(a.threads, conversationID)
 	if oldSessionID, ok := a.sessions[conversationID]; ok {
 		delete(a.sessionOwners, oldSessionID)
@@ -712,6 +734,7 @@ func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string)
 
 	a.mu.Lock()
 	policy := a.effectivePolicyLocked(conversationID)
+	override := a.personas[conversationID]
 	agentCwd := a.cwd
 	a.mu.Unlock()
 	sandboxMode, _, cwd := codexSandboxParams(policy, agentCwd)
@@ -723,6 +746,9 @@ func (a *ACPAgent) getOrCreateThread(ctx context.Context, conversationID string)
 	}
 	if a.model != "" {
 		params["model"] = a.model
+	}
+	if override.SystemPrompt != "" {
+		params["baseInstructions"] = override.SystemPrompt
 	}
 	result, err := a.rpc(ctx, "thread/start", params)
 	if err != nil {
