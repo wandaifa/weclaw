@@ -43,6 +43,7 @@ type Handler struct {
 	personaDir     string                           // ~/.weclaw/personas; empty disables persona injection
 	defaultPersona string                           // config.json default_persona; "" falls back to persona.DefaultName
 	userPersonas   map[string]string                // userID -> persona name (non-owner only)
+	nonOwnerAgent  string                           // agent name non-owner users are routed to; "" falls back to defaultNonOwnerAgentName
 	agents         map[string]agent.Agent           // name -> running agent
 	agentMetas     []AgentMeta                      // all configured agents (for /status)
 	agentWorkDirs  map[string]string                // agent name -> configured/runtime cwd
@@ -458,40 +459,36 @@ func (h *Handler) getAgent(ctx context.Context, name string) (agent.Agent, error
 	return ag, nil
 }
 
-// nonOwnerAgentName is the only agent non-owner users are ever routed to.
-// codex is a single long-lived process shared by every conversation, so it
-// can't apply a different persona/config per user; claude spawns a fresh
-// process per turn and supports per-conversation persona injection via
-// agent.PersonaAwareAgent, so it's the only backend safe to expose to
-// non-owners. See docs/superpowers/specs/2026-07-23-user-persona-isolation-design.md.
-//
-// Scope of the non-owner isolation guarantee: persona injection for claude
-// runs with --safe-mode, which the claude CLI documents as disabling
-// CLAUDE.md auto-discovery entirely (all tiers — user, project, and local
-// — not just one), along with skills/plugins/hooks/custom commands/agents,
-// while leaving auth, model selection, built-in tools, and permissions
-// untouched. This was empirically verified by manually reproducing a real
-// leaked conversation on 2026-07-24: a prior version of this override used
-// --setting-sources project,local instead, on the mistaken assumption that
-// it also excludes CLAUDE.md — it does not (that flag only governs
-// settings.json-style config file sources, an unrelated mechanism from
-// CLAUDE.md/memory) — and a real non-owner WeChat conversation received
-// the owner's full private CLAUDE.md persona verbatim as a result. If this
-// mechanism is ever changed again, reproduce it against a real `claude`
-// process and read the actual reply before trusting it, the way this bug
-// was found — args-only unit tests cannot catch a wrong CLI flag.
-const nonOwnerAgentName = "claude"
+// defaultNonOwnerAgentName is used when no NonOwnerDefaultAgent is
+// configured. codex-shared is an isolated codex-app-server instance with
+// its own CODEX_HOME (see cmd/start.go) — safe to expose to non-owners,
+// unlike the real "codex" entry which is the owner's instance with the
+// owner's real ~/.codex/AGENTS.md.
+const defaultNonOwnerAgentName = "codex-shared"
+
+// SetNonOwnerDefaultAgent configures which agent non-owner users are routed
+// to. Empty falls back to defaultNonOwnerAgentName.
+func (h *Handler) SetNonOwnerDefaultAgent(name string) {
+	h.mu.Lock()
+	h.nonOwnerAgent = name
+	h.mu.Unlock()
+}
 
 // selectedAgent returns the agent selected by this user, falling back to the
-// global default. Non-owner users always get nonOwnerAgentName regardless of
-// defaultName or any userAgents override — see nonOwnerAgentName's comment.
-// selected is always true for non-owner so a not-yet-running claude agent
-// still gets lazily started by callers' "ag == nil && selected" fallback.
+// global default. Non-owner users always get h.nonOwnerAgent (or
+// defaultNonOwnerAgentName if unset) regardless of defaultName or any
+// userAgents override. selected is always true for non-owner so a
+// not-yet-running agent still gets lazily started by callers' "ag == nil &&
+// selected" fallback.
 func (h *Handler) selectedAgent(userID string) (string, agent.Agent, bool) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	if !config.IsOwner(userID) {
-		return nonOwnerAgentName, h.agents[nonOwnerAgentName], true
+		name := h.nonOwnerAgent
+		if name == "" {
+			name = defaultNonOwnerAgentName
+		}
+		return name, h.agents[name], true
 	}
 	name, selected := h.userAgents[userID]
 	if !selected {

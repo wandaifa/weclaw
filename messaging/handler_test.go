@@ -392,17 +392,17 @@ func TestSelectedAgentIgnoresUserAgentsOverrideForNonOwner(t *testing.T) {
 		"user-2": "codex",
 	})
 
-	// Non-owner users are always routed to claude — see nonOwnerAgentName's
-	// comment on selectedAgent — regardless of any userAgents override or
+	// Non-owner users are always routed to defaultNonOwnerAgentName — see
+	// selectedAgent's comment — regardless of any userAgents override or
 	// the configured default agent.
-	if name, _, selected := h.selectedAgent("user-1"); name != "claude" || !selected {
-		t.Fatalf("user-1 selection = %q, selected=%v; want claude, true", name, selected)
+	if name, _, selected := h.selectedAgent("user-1"); name != "codex-shared" || !selected {
+		t.Fatalf("user-1 selection = %q, selected=%v; want codex-shared, true", name, selected)
 	}
-	if name, _, selected := h.selectedAgent("user-2"); name != "claude" || !selected {
-		t.Fatalf("user-2 selection = %q, selected=%v; want claude, true (override ignored for non-owner)", name, selected)
+	if name, _, selected := h.selectedAgent("user-2"); name != "codex-shared" || !selected {
+		t.Fatalf("user-2 selection = %q, selected=%v; want codex-shared, true (override ignored for non-owner)", name, selected)
 	}
-	if name, _, selected := h.selectedAgent("user-3"); name != "claude" || !selected {
-		t.Fatalf("user-3 selection = %q, selected=%v; want claude fallback, true", name, selected)
+	if name, _, selected := h.selectedAgent("user-3"); name != "codex-shared" || !selected {
+		t.Fatalf("user-3 selection = %q, selected=%v; want codex-shared fallback, true", name, selected)
 	}
 }
 
@@ -414,6 +414,22 @@ func TestSelectedAgentHonorsOwnerUserAgentsOverride(t *testing.T) {
 
 	if name, _, selected := h.selectedAgent(ownerID); name != "claude" || !selected {
 		t.Fatalf("owner selection = %q, selected=%v; want claude, true", name, selected)
+	}
+}
+
+func TestSelectedAgentDefaultsNonOwnerToCodexSharedWhenUnconfigured(t *testing.T) {
+	h := newTestHandler()
+	h.defaultName = "codex"
+	if name, _, selected := h.selectedAgent("user-x"); name != "codex-shared" || !selected {
+		t.Fatalf("selectedAgent(non-owner) = (%q, selected=%v), want (\"codex-shared\", true) when NonOwnerDefaultAgent is unset", name, selected)
+	}
+}
+
+func TestSelectedAgentHonorsConfiguredNonOwnerDefaultAgent(t *testing.T) {
+	h := newTestHandler()
+	h.SetNonOwnerDefaultAgent("claude")
+	if name, _, selected := h.selectedAgent("user-x"); name != "claude" || !selected {
+		t.Fatalf("selectedAgent(non-owner) = (%q, selected=%v), want (\"claude\", true) after SetNonOwnerDefaultAgent(\"claude\")", name, selected)
 	}
 }
 
@@ -564,7 +580,7 @@ func TestNonOwnerAgentSwitchPrefixIsPlainText(t *testing.T) {
 
 	h := NewHandler(nil, nil)
 	fake := &recordingAgent{}
-	h.SetDefaultAgent("claude", fake)
+	h.SetDefaultAgent("codex-shared", fake)
 
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 	msg := newTestMessage("non-owner-test@im.wechat", "/codex hello", 1)
@@ -583,7 +599,7 @@ func TestNonOwnerCwdIsPlainText(t *testing.T) {
 
 	h := NewHandler(nil, nil)
 	fake := &recordingAgent{}
-	h.SetDefaultAgent("claude", fake)
+	h.SetDefaultAgent("codex-shared", fake)
 	h.SetAgentWorkDirs(map[string]string{"codex": "/original/cwd"})
 
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
@@ -627,7 +643,7 @@ func TestQuotaExceededBlocksNonOwnerBeforeAgentCall(t *testing.T) {
 
 	h := NewHandler(nil, nil)
 	fake := &recordingAgent{}
-	h.SetDefaultAgent("claude", fake)
+	h.SetDefaultAgent("codex-shared", fake)
 	h.SetUserPermission("quota-test@im.wechat", config.UserPermission{Level: config.PermissionReadOnly, DailyLimit: 1})
 	// Plain text without a "/" or "@" prefix is subject to the consecutive-message
 	// merge wait; use the minimum allowed idle delay so the test doesn't sit
