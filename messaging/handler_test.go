@@ -1104,9 +1104,23 @@ func TestChatWithAgentInjectsPersonaOverrideForNonOwner(t *testing.T) {
 	if override.SystemPrompt != "脱敏人格文本" {
 		t.Fatalf("override.SystemPrompt = %q, want %q", override.SystemPrompt, "脱敏人格文本")
 	}
+	if override.FullToolAccess {
+		t.Fatal("non-owner conversations must never get FullToolAccess")
+	}
 }
 
-func TestChatWithAgentSkipsPersonaOverrideForOwner(t *testing.T) {
+// TestChatWithAgentGrantsFullToolAccessOnlyForOwner is a regression test for
+// the session-watch feature (2026-07-25): the owner needs to run
+// scripts/session_confirm.py via the "claude" CLI backend, which requires
+// Bash — but agents.claude.args in config.json hardcodes
+// --disallowedTools Bash ... for every conversation. Rather than weakening
+// that restriction globally, the owner now gets an explicit
+// PersonaOverride{FullToolAccess: true} (previously owner got no override
+// at all, per TestChatWithAgentSkipsPersonaOverrideForOwner's old name —
+// renamed because "skips" is no longer true). SafeMode/SystemPrompt must
+// stay zero-valued for the owner: only tool access changes, not the
+// persona/CLAUDE.md behavior.
+func TestChatWithAgentGrantsFullToolAccessOnlyForOwner(t *testing.T) {
 	dir := t.TempDir()
 	h := newTestHandler()
 	h.SetPersonaDir(dir)
@@ -1117,8 +1131,18 @@ func TestChatWithAgentSkipsPersonaOverrideForOwner(t *testing.T) {
 		t.Fatalf("chatWithAgent: %v", err)
 	}
 
-	if _, ok := fake.personaOverrideFor(ownerID); ok {
-		t.Fatal("owner conversations must not get a persona override")
+	override, ok := fake.personaOverrideFor(ownerID)
+	if !ok {
+		t.Fatal("expected a persona override to be recorded for the owner (FullToolAccess grant)")
+	}
+	if !override.FullToolAccess {
+		t.Fatal("owner conversations must get FullToolAccess: true")
+	}
+	if override.SafeMode {
+		t.Fatal("owner conversations must not get SafeMode")
+	}
+	if override.SystemPrompt != "" {
+		t.Fatalf("owner conversations must not get a SystemPrompt override, got %q", override.SystemPrompt)
 	}
 }
 
@@ -1161,13 +1185,20 @@ func TestHandleImageMessageSetsPersonaOverrideBeforeChatWithImage(t *testing.T) 
 	if override.SystemPrompt != "脱敏人格文本" {
 		t.Fatalf("override.SystemPrompt = %q, want %q", override.SystemPrompt, "脱敏人格文本")
 	}
+	if override.FullToolAccess {
+		t.Fatal("non-owner image turns must never get FullToolAccess")
+	}
 	calls := fake.callsSnapshot()
 	if len(calls) != 1 || !strings.HasPrefix(calls[0], "image:non-owner-test@im.wechat:") {
 		t.Fatalf("expected ChatWithImage to be called once for this conversation, got %v", calls)
 	}
 }
 
-func TestHandleImageMessageSkipsPersonaOverrideForOwner(t *testing.T) {
+// TestHandleImageMessageGrantsFullToolAccessOnlyForOwner mirrors
+// TestChatWithAgentGrantsFullToolAccessOnlyForOwner for the image-turn
+// dispatch path (renamed from TestHandleImageMessageSkipsPersonaOverrideForOwner
+// for the same reason — see that test's doc comment).
+func TestHandleImageMessageGrantsFullToolAccessOnlyForOwner(t *testing.T) {
 	dir := t.TempDir()
 	imgSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte{0x89, 0x50, 0x4E, 0x47, 1, 2, 3})
@@ -1187,8 +1218,18 @@ func TestHandleImageMessageSkipsPersonaOverrideForOwner(t *testing.T) {
 	msg := newTestMessage(ownerID, "", 1)
 	h.handleImageMessage(context.Background(), client, msg, &ilink.ImageItem{URL: imgSrv.URL})
 
-	if _, ok := fake.personaOverrideFor(ownerID); ok {
-		t.Fatal("owner conversations must not get a persona override for image turns either")
+	override, ok := fake.personaOverrideFor(ownerID)
+	if !ok {
+		t.Fatal("expected a persona override to be recorded for the owner on image turns (FullToolAccess grant)")
+	}
+	if !override.FullToolAccess {
+		t.Fatal("owner image turns must get FullToolAccess: true")
+	}
+	if override.SafeMode {
+		t.Fatal("owner image turns must not get SafeMode")
+	}
+	if override.SystemPrompt != "" {
+		t.Fatalf("owner image turns must not get a SystemPrompt override, got %q", override.SystemPrompt)
 	}
 }
 

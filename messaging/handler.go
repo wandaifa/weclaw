@@ -1419,8 +1419,13 @@ func (h *Handler) chatWithAgent(ctx context.Context, client *ilink.Client, ag ag
 	if pa, ok := ag.(agent.PolicyAwareAgent); ok {
 		pa.SetConversationPolicy(userID, h.conversationPolicy(userID))
 	}
-	if pa, ok := ag.(agent.PersonaAwareAgent); ok && !config.IsOwner(userID) {
-		_, override := h.personaOverride(userID)
+	if pa, ok := ag.(agent.PersonaAwareAgent); ok {
+		var override agent.PersonaOverride
+		if config.IsOwner(userID) {
+			override = agent.PersonaOverride{FullToolAccess: true}
+		} else {
+			_, override = h.personaOverride(userID)
+		}
 		pa.SetPersonaOverride(userID, override)
 	}
 
@@ -1949,8 +1954,13 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 	if pa, ok := ag.(agent.PolicyAwareAgent); ok {
 		pa.SetConversationPolicy(msg.FromUserID, h.conversationPolicy(msg.FromUserID))
 	}
-	if pa, ok := ag.(agent.PersonaAwareAgent); ok && !config.IsOwner(msg.FromUserID) {
-		_, override := h.personaOverride(msg.FromUserID)
+	if pa, ok := ag.(agent.PersonaAwareAgent); ok {
+		var override agent.PersonaOverride
+		if config.IsOwner(msg.FromUserID) {
+			override = agent.PersonaOverride{FullToolAccess: true}
+		} else {
+			_, override = h.personaOverride(msg.FromUserID)
+		}
 		pa.SetPersonaOverride(msg.FromUserID, override)
 	}
 

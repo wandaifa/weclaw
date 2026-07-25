@@ -161,6 +161,16 @@ type PersonaOverride struct {
 	// SystemPrompt is appended (via --append-system-prompt) after the
 	// agent's own configured system prompt. Empty means nothing is injected.
 	SystemPrompt string
+	// FullToolAccess, when true, tells CLIAgent to skip its configured
+	// extraArgs (the --disallowedTools/--allowedTools pair from
+	// agents.<name>.args in config.json) entirely for this conversation,
+	// granting unrestricted tool access. Set ONLY for the owner (see
+	// chatWithAgent / handleImageMessage in messaging/handler.go) — every
+	// non-owner conversation must keep this false so it keeps the
+	// configured tool restrictions. ACPAgent (codex) does not read this
+	// field; codex's owner-vs-non-owner tool access is governed
+	// separately via SetConversationPolicy/ConversationPolicy.Level.
+	FullToolAccess bool
 }
 
 // PersonaAwareAgent is implemented by agents that can inject a different

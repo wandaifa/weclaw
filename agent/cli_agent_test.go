@@ -42,6 +42,33 @@ func TestBuildClaudeArgsResumesSession(t *testing.T) {
 	}
 }
 
+// TestBuildClaudeArgsFullToolAccessSkipsExtraArgs is a regression test for
+// the session-watch feature (2026-07-25): the owner needs Bash access on
+// the "claude" CLI backend to run scripts/session_confirm.py, so
+// PersonaOverride.FullToolAccess must cause the configured
+// --disallowedTools/--allowedTools extraArgs to be omitted entirely.
+func TestBuildClaudeArgsFullToolAccessSkipsExtraArgs(t *testing.T) {
+	extraArgs := []string{"--disallowedTools", "Bash Write Edit NotebookEdit Read Glob Grep", "--allowedTools", "WebSearch WebFetch"}
+	got := buildClaudeArgs("hi", "", "", extraArgs, PersonaOverride{FullToolAccess: true}, "", false)
+	want := []string{"-p", "hi", "--output-format", "stream-json", "--verbose"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildClaudeArgs() = %#v, want %#v (extraArgs must be omitted)", got, want)
+	}
+}
+
+// TestBuildClaudeArgsWithoutFullToolAccessKeepsExtraArgs locks in that the
+// default (zero-value) PersonaOverride — what every non-owner conversation
+// gets — still includes the configured extraArgs unchanged, so the
+// FullToolAccess addition cannot silently loosen non-owner restrictions.
+func TestBuildClaudeArgsWithoutFullToolAccessKeepsExtraArgs(t *testing.T) {
+	extraArgs := []string{"--disallowedTools", "Bash Write Edit NotebookEdit Read Glob Grep", "--allowedTools", "WebSearch WebFetch"}
+	got := buildClaudeArgs("hi", "", "", extraArgs, PersonaOverride{}, "", false)
+	want := []string{"-p", "hi", "--output-format", "stream-json", "--verbose", "--disallowedTools", "Bash Write Edit NotebookEdit Read Glob Grep", "--allowedTools", "WebSearch WebFetch"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildClaudeArgs() = %#v, want %#v", got, want)
+	}
+}
+
 func TestBuildClaudeImageArgsOwnerNoOverride(t *testing.T) {
 	got := buildClaudeImageArgs("sonnet", "", nil, PersonaOverride{}, "", false)
 	want := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", "sonnet"}

@@ -375,7 +375,9 @@ func appendClaudeCommonArgs(args []string, model, systemPrompt string, extraArgs
 		args = append(args, "--append-system-prompt", combinedPrompt)
 	}
 
-	args = append(args, extraArgs...)
+	if !override.FullToolAccess {
+		args = append(args, extraArgs...)
+	}
 
 	if hasSession {
 		args = append(args, "--resume", sessionID)
