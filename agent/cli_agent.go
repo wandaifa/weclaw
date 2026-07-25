@@ -375,7 +375,18 @@ func appendClaudeCommonArgs(args []string, model, systemPrompt string, extraArgs
 		args = append(args, "--append-system-prompt", combinedPrompt)
 	}
 
-	if !override.FullToolAccess {
+	if override.FullToolAccess {
+		// Skipping extraArgs (the --disallowedTools/--allowedTools pair)
+		// only lifts the tool allowlist — Bash still hits Claude Code's
+		// own interactive "requires approval" prompt, which is a dead end
+		// in this non-interactive `-p` subprocess (no TTY to click yes).
+		// Confirmed via a real invocation (2026-07-25): --dangerously-skip-permissions
+		// is what actually removes that prompt; FullToolAccess must
+		// therefore mean both "no tool allowlist" and "no approval
+		// prompts" for the owner, matching codex's equivalent
+		// danger-full-access sandbox for the owner on that backend.
+		args = append(args, "--dangerously-skip-permissions")
+	} else {
 		args = append(args, extraArgs...)
 	}
 

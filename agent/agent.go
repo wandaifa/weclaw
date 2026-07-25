@@ -161,15 +161,20 @@ type PersonaOverride struct {
 	// SystemPrompt is appended (via --append-system-prompt) after the
 	// agent's own configured system prompt. Empty means nothing is injected.
 	SystemPrompt string
-	// FullToolAccess, when true, tells CLIAgent to skip its configured
+	// FullToolAccess, when true, tells CLIAgent to (1) skip its configured
 	// extraArgs (the --disallowedTools/--allowedTools pair from
-	// agents.<name>.args in config.json) entirely for this conversation,
-	// granting unrestricted tool access. Set ONLY for the owner (see
-	// chatWithAgent / handleImageMessage in messaging/handler.go) — every
-	// non-owner conversation must keep this false so it keeps the
-	// configured tool restrictions. ACPAgent (codex) does not read this
-	// field; codex's owner-vs-non-owner tool access is governed
-	// separately via SetConversationPolicy/ConversationPolicy.Level.
+	// agents.<name>.args in config.json) and (2) pass
+	// --dangerously-skip-permissions. Both are required for real
+	// unrestricted access: lifting the tool allowlist alone still leaves
+	// Bash behind Claude Code's own interactive "requires approval"
+	// prompt, a dead end in this non-interactive `-p` subprocess (no TTY
+	// to click yes) — confirmed via a real invocation (2026-07-25). Set
+	// ONLY for the owner (see chatWithAgent / handleImageMessage in
+	// messaging/handler.go) — every non-owner conversation must keep this
+	// false so it keeps the configured tool restrictions AND the approval
+	// prompts. ACPAgent (codex) does not read this field; codex's
+	// owner-vs-non-owner tool access is governed separately via
+	// SetConversationPolicy/ConversationPolicy.Level.
 	FullToolAccess bool
 }
 

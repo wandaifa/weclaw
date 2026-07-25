@@ -47,19 +47,25 @@ func TestBuildClaudeArgsResumesSession(t *testing.T) {
 // the "claude" CLI backend to run scripts/session_confirm.py, so
 // PersonaOverride.FullToolAccess must cause the configured
 // --disallowedTools/--allowedTools extraArgs to be omitted entirely.
+// It must ALSO add --dangerously-skip-permissions: a real invocation
+// confirmed that lifting the tool allowlist alone still leaves Bash behind
+// Claude Code's own interactive "requires approval" prompt, which is a dead
+// end in this non-interactive `-p` subprocess (no TTY to click yes).
 func TestBuildClaudeArgsFullToolAccessSkipsExtraArgs(t *testing.T) {
 	extraArgs := []string{"--disallowedTools", "Bash Write Edit NotebookEdit Read Glob Grep", "--allowedTools", "WebSearch WebFetch"}
 	got := buildClaudeArgs("hi", "", "", extraArgs, PersonaOverride{FullToolAccess: true}, "", false)
-	want := []string{"-p", "hi", "--output-format", "stream-json", "--verbose"}
+	want := []string{"-p", "hi", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("buildClaudeArgs() = %#v, want %#v (extraArgs must be omitted)", got, want)
+		t.Fatalf("buildClaudeArgs() = %#v, want %#v (extraArgs must be omitted, --dangerously-skip-permissions must be present)", got, want)
 	}
 }
 
 // TestBuildClaudeArgsWithoutFullToolAccessKeepsExtraArgs locks in that the
 // default (zero-value) PersonaOverride — what every non-owner conversation
-// gets — still includes the configured extraArgs unchanged, so the
-// FullToolAccess addition cannot silently loosen non-owner restrictions.
+// gets — still includes the configured extraArgs unchanged and never gets
+// --dangerously-skip-permissions (the exact `want` slice below has neither
+// extra nor missing flags), so the FullToolAccess addition cannot silently
+// loosen non-owner restrictions.
 func TestBuildClaudeArgsWithoutFullToolAccessKeepsExtraArgs(t *testing.T) {
 	extraArgs := []string{"--disallowedTools", "Bash Write Edit NotebookEdit Read Glob Grep", "--allowedTools", "WebSearch WebFetch"}
 	got := buildClaudeArgs("hi", "", "", extraArgs, PersonaOverride{}, "", false)
