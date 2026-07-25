@@ -96,8 +96,14 @@ func MarkdownToPlainText(text string) string {
 	// Inline code: strip backticks (do after code blocks)
 	result = reInlineCode.ReplaceAllString(result, "$1")
 
-	// Clean up excessive blank lines
-	result = regexp.MustCompile(`\n{3,}`).ReplaceAllString(result, "\n\n")
+	// WeChat's ilink bot text renders a single "\n" as a soft break (collapsed
+	// to a space); only a blank line ("\n\n") becomes a visible line break —
+	// verified on a real device 2026-07-25 with a single-vs-double-newline probe
+	// (see ROADMAP.md "最近验证"). Promote every run of newlines to exactly one
+	// blank line so intended line breaks (bullet lists, numbered steps, the
+	// `claude agents` session list) survive instead of collapsing into a
+	// "• a • b • c" wall. This also subsumes the old \n{3,} -> \n\n cleanup.
+	result = regexp.MustCompile(`\n+`).ReplaceAllString(result, "\n\n")
 
 	return strings.TrimSpace(result)
 }
