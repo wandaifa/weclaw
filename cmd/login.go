@@ -115,11 +115,11 @@ func localAPIURL(addr, path string) (string, error) {
 
 // loginWelcomeMaxAttempts/loginWelcomeRetryDelay give iLink's backend time
 // to finish "preparing" a session right after QR confirmation. Sending
-// immediately can fail with ret=-2 "prepare failed" (observed 2026-07-24)
-// because the just-confirmed account isn't ready to receive send requests
-// yet, even though the credentials themselves are already valid.
-const loginWelcomeMaxAttempts = 5
-const loginWelcomeRetryDelay = 2 * time.Second
+// immediately can fail with ret=-2 "prepare failed" (observed 2026-07-24).
+// The original 5x2s (10s) window wasn't enough on 2026-07-25, so it's
+// widened to 8x3s (24s) since iLink's prepare time isn't consistent.
+const loginWelcomeMaxAttempts = 8
+const loginWelcomeRetryDelay = 3 * time.Second
 
 func sendLoginWelcome(ctx context.Context, creds *ilink.Credentials) error {
 	return sendLoginWelcomeWithRetry(ctx, creds, loginWelcomeMaxAttempts, loginWelcomeRetryDelay)
