@@ -75,9 +75,28 @@ func TestBuildClaudeArgsWithoutFullToolAccessKeepsExtraArgs(t *testing.T) {
 	}
 }
 
-func TestBuildClaudeImageArgsOwnerNoOverride(t *testing.T) {
+// TestBuildClaudeImageArgsZeroOverride exercises buildClaudeImageArgs with a
+// zero-value PersonaOverride (renamed from ...OwnerNoOverride: at the
+// handler level the owner now always gets a non-zero override —
+// {FullToolAccess: true} — so "owner" and "no override" are no longer the
+// same case; this test is purely about the zero-value behavior).
+func TestBuildClaudeImageArgsZeroOverride(t *testing.T) {
 	got := buildClaudeImageArgs("sonnet", "", nil, PersonaOverride{}, "", false)
 	want := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--model", "sonnet"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildClaudeImageArgs() = %#v, want %#v", got, want)
+	}
+}
+
+// TestBuildClaudeImageArgsFullToolAccess locks in that the owner's
+// FullToolAccess grant (skip extraArgs, add --dangerously-skip-permissions)
+// applies to the image-turn arg builder too, not just the text-turn one —
+// both funnel through appendClaudeCommonArgs, but this pins it explicitly
+// rather than leaving it only transitively covered.
+func TestBuildClaudeImageArgsFullToolAccess(t *testing.T) {
+	extraArgs := []string{"--disallowedTools", "Bash Write Edit NotebookEdit Read Glob Grep", "--allowedTools", "WebSearch WebFetch"}
+	got := buildClaudeImageArgs("", "", extraArgs, PersonaOverride{FullToolAccess: true}, "", false)
+	want := []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--dangerously-skip-permissions"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildClaudeImageArgs() = %#v, want %#v", got, want)
 	}

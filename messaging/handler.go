@@ -333,6 +333,24 @@ func (h *Handler) personaOverride(userID string) (personaName string, override a
 	return name, agent.PersonaOverride{SafeMode: true, SystemPrompt: text}
 }
 
+// personaOverrideForUser resolves the agent.PersonaOverride to apply for one
+// conversation, owner or not: the owner gets FullToolAccess (no SafeMode, no
+// SystemPrompt override — only tool access changes for them), everyone else
+// gets personaOverride's sanitized non-owner override unchanged. Both
+// chatWithAgent (text turns) and handleImageMessage (image turns) must call
+// this same helper rather than re-deriving the owner/non-owner branch
+// independently — this project has been bitten before by the same logic
+// drifting apart across sibling dispatch paths (see PersonaOverride's and
+// TestHandleImageMessageSetsPersonaOverrideBeforeChatWithImage's doc
+// comments for the 2026-07-24 incident this guards against).
+func (h *Handler) personaOverrideForUser(userID string) agent.PersonaOverride {
+	if config.IsOwner(userID) {
+		return agent.PersonaOverride{FullToolAccess: true}
+	}
+	_, override := h.personaOverride(userID)
+	return override
+}
+
 // SetAccessMode updates the gate deciding whether non-owner messages reach
 // an agent at all. Called at startup (restoring config) and by the internal
 // permissions API after saving a change.
@@ -1420,13 +1438,7 @@ func (h *Handler) chatWithAgent(ctx context.Context, client *ilink.Client, ag ag
 		pa.SetConversationPolicy(userID, h.conversationPolicy(userID))
 	}
 	if pa, ok := ag.(agent.PersonaAwareAgent); ok {
-		var override agent.PersonaOverride
-		if config.IsOwner(userID) {
-			override = agent.PersonaOverride{FullToolAccess: true}
-		} else {
-			_, override = h.personaOverride(userID)
-		}
-		pa.SetPersonaOverride(userID, override)
+		pa.SetPersonaOverride(userID, h.personaOverrideForUser(userID))
 	}
 
 	info := ag.Info()
@@ -1955,13 +1967,7 @@ func (h *Handler) handleImageMessage(ctx context.Context, client *ilink.Client, 
 		pa.SetConversationPolicy(msg.FromUserID, h.conversationPolicy(msg.FromUserID))
 	}
 	if pa, ok := ag.(agent.PersonaAwareAgent); ok {
-		var override agent.PersonaOverride
-		if config.IsOwner(msg.FromUserID) {
-			override = agent.PersonaOverride{FullToolAccess: true}
-		} else {
-			_, override = h.personaOverride(msg.FromUserID)
-		}
-		pa.SetPersonaOverride(msg.FromUserID, override)
+		pa.SetPersonaOverride(msg.FromUserID, h.personaOverrideForUser(msg.FromUserID))
 	}
 
 	var reply string

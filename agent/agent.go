@@ -172,9 +172,18 @@ type PersonaOverride struct {
 	// ONLY for the owner (see chatWithAgent / handleImageMessage in
 	// messaging/handler.go) — every non-owner conversation must keep this
 	// false so it keeps the configured tool restrictions AND the approval
-	// prompts. ACPAgent (codex) does not read this field; codex's
-	// owner-vs-non-owner tool access is governed separately via
-	// SetConversationPolicy/ConversationPolicy.Level.
+	// prompts. ACPAgent (codex) does not read this field — confirmed
+	// thread/start only reads override.SystemPrompt — so it's inert there
+	// for the owner (whose SystemPrompt is always empty). One side effect
+	// on the codex path: before this field existed, SetPersonaOverride was
+	// never called for the owner at all; now it is (with FullToolAccess
+	// alone set), so the first owner codex turn after a deploy sees a
+	// persona change from "no override recorded" to "recorded", which
+	// invalidates that conversation's cached thread once (ACPAgent.
+	// SetPersonaOverride deletes a.threads[conversationID] whenever the
+	// override changes). This is a harmless one-time thread rebind, not a
+	// repeating cost — subsequent turns pass the identical override and
+	// the equality check short-circuits.
 	FullToolAccess bool
 }
 
