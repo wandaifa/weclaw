@@ -490,6 +490,22 @@ func TestSetAgentModelConfigUpdatesRunningAgent(t *testing.T) {
 	}
 }
 
+func TestOwnerModelConfigDoesNotChangeSharedAgent(t *testing.T) {
+	h := newTestHandler()
+	owner, shared := &recordingAgent{}, &recordingAgent{}
+	h.SetDefaultAgent("codex", owner)
+	h.SetDefaultAgent("codex-shared", shared)
+	if err := h.SetAgentModelConfig("codex", "gpt-6.1-sol", "high"); err != nil {
+		t.Fatal(err)
+	}
+	if model, effort := owner.modelConfigSnapshot(); model != "gpt-6.1-sol" || effort != "high" {
+		t.Fatalf("owner model/effort = %q/%q", model, effort)
+	}
+	if model, effort := shared.modelConfigSnapshot(); model != "" || effort != "" {
+		t.Fatalf("shared model unexpectedly changed: %q/%q", model, effort)
+	}
+}
+
 func TestSetAgentModelConfigIsNoOpWhenAgentNotRunning(t *testing.T) {
 	h := newTestHandler()
 	if err := h.SetAgentModelConfig("codex-shared", "gpt-5.1-mini", "low"); err != nil {

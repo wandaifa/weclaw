@@ -115,7 +115,7 @@ type AgentModelSettings struct {
 
 // AgentModelSettingsResponse is the GET response: current settings for
 // every agent whose model tier can be changed live, keyed by agent name
-// ("codex-shared", "claude").
+// ("codex", "codex-shared", "claude").
 type AgentModelSettingsResponse struct {
 	Agents map[string]AgentModelSettings `json:"agents"`
 }

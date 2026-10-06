@@ -356,12 +356,12 @@ func runStart(cmd *cobra.Command, args []string) error {
 		return settings, nil
 	})
 	// modelConfigurableAgents lists every agent name the 18022 admin panel can
-	// change the model/reasoning-effort for. Both are non-owner-facing:
+	// change the model/reasoning-effort for. codex is owner-only;
 	// codex-shared is the isolated instance non-owner defaults to, and claude
 	// is the one real claude instance shared by owner and (when switched to)
 	// non-owner alike -- changing it here affects both.
-	modelConfigurableAgents := []string{"codex-shared", "claude"}
-	validReasoningEfforts := map[string]bool{"": true, "none": true, "low": true, "medium": true, "high": true, "xhigh": true}
+	modelConfigurableAgents := []string{"codex", "codex-shared", "claude"}
+	validReasoningEfforts := map[string]bool{"": true, "none": true, "low": true, "medium": true, "high": true, "xhigh": true, "max": true, "ultra": true}
 	apiServer.SetAgentModelProvider(func() api.AgentModelSettingsResponse {
 		configMu.Lock()
 		defer configMu.Unlock()
@@ -387,7 +387,7 @@ func runStart(cmd *cobra.Command, args []string) error {
 			return api.AgentModelSettingsResponse{}, fmt.Errorf("claude has no model_reasoning_effort concept, must be empty")
 		}
 		if !validReasoningEfforts[req.ModelReasoningEffort] {
-			return api.AgentModelSettingsResponse{}, fmt.Errorf("model_reasoning_effort must be one of none/low/medium/high/xhigh (or empty), got %q", req.ModelReasoningEffort)
+			return api.AgentModelSettingsResponse{}, fmt.Errorf("model_reasoning_effort must be one of none/low/medium/high/xhigh/max/ultra (or empty), got %q", req.ModelReasoningEffort)
 		}
 		configMu.Lock()
 		agCfg, ok := cfg.Agents[req.Agent]
