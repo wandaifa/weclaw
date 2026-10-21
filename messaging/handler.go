@@ -907,6 +907,10 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 		return
 	}
 
+	if err := sendPendingLoginWelcome(ctx, client, msg); err != nil {
+		log.Printf("[handler] deferred login welcome failed for bot=%s: %v", client.BotID(), err)
+	}
+
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
 	if text == "" {

@@ -785,8 +785,10 @@ func doLogin(ctx context.Context) (*ilink.Credentials, error) {
 	if err := ilink.SaveCredentials(creds); err != nil {
 		return nil, fmt.Errorf("failed to save credentials: %w", err)
 	}
-	if err := sendLoginWelcome(ctx, creds); err != nil {
-		log.Printf("Login welcome message failed for %s: %v", creds.ILinkBotID, err)
+	if err := ilink.MarkLoginWelcomePending(creds.ILinkBotID, creds.ILinkUserID); err != nil {
+		log.Printf("Failed to prepare login welcome for %s: %v", creds.ILinkBotID, err)
+	} else {
+		fmt.Println("Welcome message will be sent after your first message to the bot.")
 	}
 
 	dir, _ := ilink.CredentialsPath()
