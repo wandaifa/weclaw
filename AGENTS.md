@@ -13,7 +13,7 @@
 
 ## 验证
 
-运行改动所在包的 go test，再构建到本项目 bin/weclaw（/opt/homebrew/bin/weclaw 的实际软链接目标）；全量测试存在历史失败时如实报告。不得放宽 owner/非 owner 隔离。模型设置分别允许 codex（owner）、codex-shared（非 owner）和 claude（共用）。
+运行改动所在包的 go test，再用 `make deploy` 构建到本项目 bin/weclaw（/opt/homebrew/bin/weclaw 的实际软链接目标）并重启。不得手动 `go build` 后只 `weclaw restart` 一次：本机无签名证书，二进制为 ad-hoc 签名，每次重编译签名指纹都会变，launchd 首次拉起会因 macOS 启动约束被杀（日志 `OS_REASON_CODESIGNING | Launch Constraint Violation`），约 10 秒后 BTM 重新登记（`invalidateLaunchItem`）才能启动；`make deploy` 会检查并补拉。2026-10-22 两次部署因此中断 bridge。全量测试存在历史失败时如实报告。不得放宽 owner/非 owner 隔离。模型设置分别允许 codex（owner）、codex-shared（非 owner）和 claude（共用）。
 
 ## 版本
 

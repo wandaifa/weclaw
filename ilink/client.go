@@ -82,7 +82,7 @@ func SelectClient(clients []*Client, botID string) (*Client, error) {
 func (c *Client) GetUpdates(ctx context.Context, buf string) (*GetUpdatesResponse, error) {
 	reqBody := GetUpdatesRequest{
 		GetUpdatesBuf: buf,
-		BaseInfo:      BaseInfo{ChannelVersion: "1.0.0"},
+		BaseInfo:      BaseInfo{},
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, longPollTimeout+5*time.Second)
@@ -202,6 +202,7 @@ func (c *Client) doGet(ctx context.Context, url string, result interface{}) erro
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
+	setAppHeaders(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -229,6 +230,13 @@ func (c *Client) setHeaders(req *http.Request) {
 	req.Header.Set("AuthorizationType", "ilink_bot_token")
 	req.Header.Set("Authorization", "Bearer "+c.botToken)
 	req.Header.Set("X-WECHAT-UIN", c.wechatUIN)
+	setAppHeaders(req)
+}
+
+// setAppHeaders sets the iLink app identity headers sent on every request.
+func setAppHeaders(req *http.Request) {
+	req.Header.Set("iLink-App-Id", AppID)
+	req.Header.Set("iLink-App-ClientVersion", AppClientVersion)
 }
 
 func generateWechatUIN() string {

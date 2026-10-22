@@ -1,6 +1,11 @@
 package ilink
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // Message types
 const (
@@ -49,9 +54,55 @@ type Credentials struct {
 	ILinkUserID string `json:"ilink_user_id"`
 }
 
-// BaseInfo is included in request bodies.
+// Client identity sent to iLink, aligned with @tencent-weixin/openclaw-weixin 2.4.10.
+// With the old "1.0.0" identity the server delivered quoted messages as empty shells.
+const (
+	ChannelVersion   = "2.4.10"
+	AppID            = "bot"
+	AppClientVersion = "132106" // 2.4.10 as major<<16 | minor<<8 | patch
+	DefaultBotAgent  = "OpenClaw"
+)
+
+// BaseInfo is included in request bodies; empty fields default to the client identity.
 type BaseInfo struct {
 	ChannelVersion string `json:"channel_version,omitempty"`
+	BotAgent       string `json:"bot_agent,omitempty"`
+}
+
+func (b BaseInfo) MarshalJSON() ([]byte, error) {
+	if b.ChannelVersion == "" {
+		b.ChannelVersion = ChannelVersion
+	}
+	if b.BotAgent == "" {
+		b.BotAgent = DefaultBotAgent
+	}
+	type plain BaseInfo
+	return json.Marshal(plain(b))
+}
+
+// MessageID is a uint64 on the wire; newer servers may encode it as a JSON string.
+type MessageID uint64
+
+func (id *MessageID) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(string(data), `"`)
+	if s == "" || s == "null" {
+		*id = 0
+		return nil
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return fmt.Errorf("parse message_id %q: %w", s, err)
+	}
+	*id = MessageID(v)
+	return nil
+}
+
+// String returns the decimal ID, or "" when absent.
+func (id MessageID) String() string {
+	if id == 0 {
+		return ""
+	}
+	return strconv.FormatUint(uint64(id), 10)
 }
 
 // GetUpdatesRequest is the body for getupdates.
@@ -73,7 +124,7 @@ type GetUpdatesResponse struct {
 // WeixinMessage represents a message from WeChat.
 type WeixinMessage struct {
 	Seq          int           `json:"seq,omitempty"`
-	MessageID    int64         `json:"message_id,omitempty"`
+	MessageID    MessageID     `json:"message_id,omitempty"`
 	FromUserID   string        `json:"from_user_id"`
 	ToUserID     string        `json:"to_user_id"`
 	MessageType  int           `json:"message_type"`

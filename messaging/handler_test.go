@@ -732,7 +732,7 @@ func TestSafeInboundMediaNameAddsVideoExt(t *testing.T) {
 func newTestMessage(userID, text string, messageID int64) ilink.WeixinMessage {
 	return ilink.WeixinMessage{
 		FromUserID:   userID,
-		MessageID:    messageID,
+		MessageID:    ilink.MessageID(messageID),
 		MessageType:  ilink.MessageTypeUser,
 		MessageState: ilink.MessageStateFinish,
 		ItemList: []ilink.MessageItem{
