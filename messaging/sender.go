@@ -44,6 +44,10 @@ func SendTypingState(ctx context.Context, client *ilink.Client, userID, contextT
 // went visibly silent partway through.
 const typingRefreshInterval = 8 * time.Second
 
+// weChatTextSafetyLimitBytes is below the measured 16,121-byte iLink ceiling
+// for a raw bot text item, leaving room for the rest of the message envelope.
+const weChatTextSafetyLimitBytes = 16000
+
 func stillWorkingReply() string {
 	return "正在处理中，请稍等…"
 }
@@ -115,38 +119,21 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 		m = meta[0]
 	}
 
-	// Convert markdown to plain text for WeChat display
-	plainText := MarkdownToPlainText(text)
-
-	req := &ilink.SendMessageRequest{
-		Msg: ilink.SendMsg{
-			FromUserID:   client.BotID(),
-			ToUserID:     toUserID,
-			ClientID:     clientID,
-			MessageType:  ilink.MessageTypeBot,
-			MessageState: ilink.MessageStateFinish,
-			ItemList: []ilink.MessageItem{
-				{
-					Type: ilink.ItemTypeText,
-					TextItem: &ilink.TextItem{
-						Text: plainText,
-					},
-				},
-			},
-			ContextToken: contextToken,
-		},
-		BaseInfo: ilink.BaseInfo{},
+	for index, chunk := range WeChatTextChunks(text, weChatTextSafetyLimitBytes) {
+		chunkClientID := clientID
+		if index > 0 {
+			chunkClientID = NewClientID()
+		}
+		req := &ilink.SendMessageRequest{Msg: ilink.SendMsg{FromUserID: client.BotID(), ToUserID: toUserID, ClientID: chunkClientID, MessageType: ilink.MessageTypeBot, MessageState: ilink.MessageStateFinish, ItemList: []ilink.MessageItem{{Type: ilink.ItemTypeText, TextItem: &ilink.TextItem{Text: chunk}}}, ContextToken: contextToken}, BaseInfo: ilink.BaseInfo{}}
+		resp, err := client.SendMessage(ctx, req)
+		if err != nil {
+			return fmt.Errorf("send message: %w", err)
+		}
+		if resp.Ret != 0 {
+			return fmt.Errorf("send message failed: ret=%d errmsg=%s", resp.Ret, resp.ErrMsg)
+		}
+		recordSentChunk(client.BotID(), toUserID, resp.MessageID, chunk)
 	}
-
-	resp, err := client.SendMessage(ctx, req)
-	if err != nil {
-		return fmt.Errorf("send message: %w", err)
-	}
-
-	if resp.Ret != 0 {
-		return fmt.Errorf("send message failed: ret=%d errmsg=%s", resp.Ret, resp.ErrMsg)
-	}
-	recordSentChunk(client.BotID(), toUserID, resp.MessageID, plainText)
 
 	log.Printf("[sender] bot=%s sent reply to %s: %q", client.BotID(), toUserID, truncate(text, 50))
 	persistMessage(store.MessageRecord{

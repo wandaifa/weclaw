@@ -1,8 +1,10 @@
 package messaging
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 var (
@@ -106,4 +108,68 @@ func MarkdownToPlainText(text string) string {
 	result = regexp.MustCompile(`\n+`).ReplaceAllString(result, "\n\n")
 
 	return strings.TrimSpace(result)
+}
+
+// WeChatTextChunks turns Markdown into readable WeChat text and splits only at
+// paragraph or sentence boundaries when one text message would be too long.
+// limit is a UTF-8 byte limit, matching the iLink payload limit.
+func WeChatTextChunks(text string, limit int) []string {
+	plain := MarkdownToPlainText(text)
+	if limit <= 0 || len(plain) <= limit {
+		return []string{plain}
+	}
+	payloadLimit := limit - 64 // reserve room for 〖N/M〗 and a newline
+	if payloadLimit < 100 {
+		payloadLimit = 100
+	}
+	var raw []string
+	current := ""
+	for _, paragraph := range strings.Split(plain, "\n\n") {
+		candidate := paragraph
+		if current != "" {
+			candidate = current + "\n\n" + paragraph
+		}
+		if len(candidate) <= payloadLimit {
+			current = candidate
+			continue
+		}
+		if current != "" {
+			raw = append(raw, current)
+			current = ""
+		}
+		for len(paragraph) > payloadLimit {
+			chunk, remaining := splitTextAtByteLimit(paragraph, payloadLimit)
+			raw = append(raw, chunk)
+			paragraph = remaining
+		}
+		current = paragraph
+	}
+	if current != "" {
+		raw = append(raw, current)
+	}
+	if len(raw) == 1 {
+		return raw
+	}
+	chunks := make([]string, len(raw))
+	for index, chunk := range raw {
+		chunks[index] = fmt.Sprintf("〖%d/%d〗\n%s", index+1, len(raw), chunk)
+	}
+	return chunks
+}
+
+// splitTextAtByteLimit cuts text at a UTF-8 boundary, preferring the last
+// Chinese sentence separator in the latter half of the allowed payload.
+func splitTextAtByteLimit(text string, limit int) (string, string) {
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	for index := cut; index > limit/2; {
+		runeValue, size := utf8.DecodeLastRuneInString(text[:index])
+		if strings.ContainsRune("。！？；，", runeValue) {
+			return text[:index], text[index:]
+		}
+		index -= size
+	}
+	return text[:cut], text[cut:]
 }

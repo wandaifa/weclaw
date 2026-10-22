@@ -1,6 +1,11 @@
 package messaging
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"unicode/utf8"
+)
 
 // TestMarkdownSingleNewlinesBecomeBlankLines is the regression test for the
 // 2026-07-25 finding: WeChat's ilink bot text collapses a single "\n" into a
@@ -35,5 +40,45 @@ func TestMarkdownNumberedListBreaksSurvive(t *testing.T) {
 	want := "步骤：\n\n1. 打开文件\n\n2. 改第 3 行\n\n3. 保存"
 	if got := MarkdownToPlainText(in); got != want {
 		t.Fatalf("MarkdownToPlainText() = %q\nwant %q", got, want)
+	}
+}
+
+func TestWeChatTextChunksKeepParagraphsAndStayWithinLimit(t *testing.T) {
+	input := "# 进度\n\n" + strings.Repeat("第一段内容。", 400) + "\n\n" + strings.Repeat("第二段内容。", 400)
+	chunks := WeChatTextChunks(input, 1800)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want multiple chunks", len(chunks))
+	}
+	for index, chunk := range chunks {
+		if len(chunk) > 1800 || !strings.HasPrefix(chunk, fmt.Sprintf("〖%d/", index+1)) {
+			t.Fatalf("chunk %d invalid: %q", index, chunk[:min(len(chunk), 40)])
+		}
+	}
+}
+
+func TestWeChatTextChunksUseUTF8ByteLimit(t *testing.T) {
+	withinLimit := strings.Repeat("测", 5333) + "a" // 16,000 UTF-8 bytes
+	if chunks := WeChatTextChunks(withinLimit, 16000); len(chunks) != 1 || chunks[0] != withinLimit {
+		t.Fatalf("16,000-byte text should stay in one chunk: %#v", chunks)
+	}
+
+	overLimit := withinLimit + "b"
+	chunks := WeChatTextChunks(overLimit, 16000)
+	if len(chunks) < 2 {
+		t.Fatalf("16,001-byte text should be split, got %d chunks", len(chunks))
+	}
+	var rebuilt strings.Builder
+	for index, chunk := range chunks {
+		if len(chunk) > 16000 || !utf8.ValidString(chunk) {
+			t.Fatalf("chunk %d exceeds byte limit or breaks UTF-8", index)
+		}
+		_, payload, found := strings.Cut(chunk, "\n")
+		if !found {
+			t.Fatalf("chunk %d has no split marker: %q", index, chunk)
+		}
+		rebuilt.WriteString(payload)
+	}
+	if rebuilt.String() != overLimit {
+		t.Fatalf("rebuilt text = %q, want original", rebuilt.String())
 	}
 }
