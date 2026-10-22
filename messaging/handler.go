@@ -1191,18 +1191,16 @@ func shouldRedirectClaudeImageGeneration(agentName, text string) bool {
 	return isLikelyImageGenerationRequest(text)
 }
 
-// nudgeParamsFor picks the still-working nudge threshold and text for a
-// message: image-generation requests get a shorter threshold and a more
-// specific message (see imageGenerationNudgeThreshold), since they're
-// already known to be slow — everything else gets the generic ones.
-func nudgeParamsFor(message string) (time.Duration, string) {
+// processingNoticeFor picks the one-time notice sent immediately before the
+// selected agent starts work.
+func processingNoticeFor(message string) string {
 	if isLikelyImageGenerationRequest(message) {
-		return imageGenerationNudgeThreshold, imageGenerationStillWorkingReply()
+		return imageGenerationStillWorkingReply()
 	}
 	if isLikelyLongRunningRequest(message) {
-		return longRunningNudgeThreshold, longRunningStillWorkingReply()
+		return longRunningStillWorkingReply()
 	}
-	return stillWorkingThreshold, stillWorkingReply()
+	return stillWorkingReply()
 }
 
 // isLikelyLongRunningRequest heuristically detects other known-slow request
@@ -1450,12 +1448,12 @@ func (h *Handler) chatWithAgent(ctx context.Context, client *ilink.Client, ag ag
 	info := ag.Info()
 	log.Printf("[handler] dispatching to agent (%s) for %s", info, userID)
 
-	nudgeThreshold, nudgeText := nudgeParamsFor(message)
+	nudgeText := processingNoticeFor(message)
 
 	start := time.Now()
 	var reply string
 	var err error
-	withTypingRefreshEvery(ctx, client, userID, contextToken, typingRefreshInterval, nudgeThreshold, nudgeText, func() {
+	withTypingRefreshEvery(ctx, client, userID, contextToken, typingRefreshInterval, nudgeText, func() {
 		reply, err = ag.Chat(ctx, userID, withQuotedContext(ctx, client, userID, message))
 	})
 	elapsed := time.Since(start)

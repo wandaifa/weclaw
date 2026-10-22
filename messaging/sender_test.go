@@ -45,7 +45,7 @@ func TestWithTypingRefreshEveryRefreshesTypingPeriodically(t *testing.T) {
 	defer srv.Close()
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 
-	withTypingRefreshEvery(context.Background(), client, "user-a", "", 20*time.Millisecond, time.Hour, stillWorkingReply(), func() {
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", 20*time.Millisecond, stillWorkingReply(), func() {
 		time.Sleep(90 * time.Millisecond) // long enough for ~4 refresh ticks at 20ms
 	})
 
@@ -54,22 +54,18 @@ func TestWithTypingRefreshEveryRefreshesTypingPeriodically(t *testing.T) {
 	}
 }
 
-func TestWithTypingRefreshEverySendsNudgeAfterThreshold(t *testing.T) {
+func TestWithTypingRefreshEverySendsNoticeBeforeWork(t *testing.T) {
 	srv, _, sent := newTypingCountingServer(t)
 	defer srv.Close()
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 
-	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, 20*time.Millisecond, stillWorkingReply(), func() {
-		time.Sleep(60 * time.Millisecond) // past the 20ms nudge threshold
-	})
-
-	waitFor(t, time.Second, func() bool {
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, stillWorkingReply(), func() {
 		for _, text := range sent.snapshot() {
 			if text == stillWorkingReply() {
-				return true
+				return
 			}
 		}
-		return false
+		t.Fatal("processing notice must be sent before work starts")
 	})
 }
 
@@ -78,40 +74,36 @@ func TestWithTypingRefreshEveryUsesGivenNudgeText(t *testing.T) {
 	defer srv.Close()
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 
-	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, 20*time.Millisecond, imageGenerationStillWorkingReply(), func() {
-		time.Sleep(60 * time.Millisecond)
-	})
-
-	waitFor(t, time.Second, func() bool {
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, imageGenerationStillWorkingReply(), func() {
 		for _, text := range sent.snapshot() {
 			if text == imageGenerationStillWorkingReply() {
-				return true
+				return
 			}
 		}
-		return false
+		t.Fatal("specific processing notice must be sent before work starts")
 	})
 }
 
-func TestWithTypingRefreshEveryStopsWhenWorkReturnsQuickly(t *testing.T) {
+func TestWithTypingRefreshEverySendsOneNoticeWhenWorkReturnsQuickly(t *testing.T) {
 	srv, typingCount, sent := newTypingCountingServer(t)
 	defer srv.Close()
 	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
 
-	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, time.Hour, stillWorkingReply(), func() {})
+	withTypingRefreshEvery(context.Background(), client, "user-a", "", time.Hour, stillWorkingReply(), func() {})
 
 	// Give the background goroutine a moment to (not) fire before asserting.
 	time.Sleep(20 * time.Millisecond)
 	if got := atomic.LoadInt32(typingCount); got != 0 {
 		t.Fatalf("typing refresh count = %d, want 0 when work() returns before the first interval elapses", got)
 	}
-	if len(sent.snapshot()) != 0 {
-		t.Fatalf("sent replies = %v, want none when work() returns before the nudge threshold elapses", sent.snapshot())
+	if replies := sent.snapshot(); len(replies) != 1 || replies[0] != stillWorkingReply() {
+		t.Fatalf("sent replies = %v, want one immediate processing notice", replies)
 	}
 }
 
 func TestWithTypingRefreshEveryNilClientDoesNotPanic(t *testing.T) {
 	ran := false
-	withTypingRefreshEvery(context.Background(), nil, "user-a", "", 5*time.Millisecond, 5*time.Millisecond, stillWorkingReply(), func() {
+	withTypingRefreshEvery(context.Background(), nil, "user-a", "", 5*time.Millisecond, stillWorkingReply(), func() {
 		time.Sleep(30 * time.Millisecond)
 		ran = true
 	})

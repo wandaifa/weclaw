@@ -559,15 +559,9 @@ func TestNudgeParamsForUsesShorterThresholdForImageGeneration(t *testing.T) {
 		"帮我设计一张美女在天安门跳舞的图片", // real production miss: "设计" wasn't in the verb list
 	}
 	for _, request := range requests {
-		threshold, text := nudgeParamsFor(request)
-		if threshold != imageGenerationNudgeThreshold {
-			t.Fatalf("nudgeParamsFor(%q) threshold = %v, want imageGenerationNudgeThreshold (%v)", request, threshold, imageGenerationNudgeThreshold)
-		}
+		text := processingNoticeFor(request)
 		if text != imageGenerationStillWorkingReply() {
-			t.Fatalf("nudgeParamsFor(%q) text = %q, want the image-generation nudge text", request, text)
-		}
-		if threshold >= stillWorkingThreshold {
-			t.Fatalf("image-generation threshold (%v) should be shorter than the generic one (%v)", threshold, stillWorkingThreshold)
+			t.Fatalf("processingNoticeFor(%q) = %q, want the image-generation notice", request, text)
 		}
 	}
 }
@@ -580,12 +574,9 @@ func TestNudgeParamsForUsesGenericThresholdForOrdinaryMessages(t *testing.T) {
 		"帮我总结一下",
 	}
 	for _, request := range requests {
-		threshold, text := nudgeParamsFor(request)
-		if threshold != stillWorkingThreshold {
-			t.Fatalf("nudgeParamsFor(%q) threshold = %v, want the generic stillWorkingThreshold (%v)", request, threshold, stillWorkingThreshold)
-		}
+		text := processingNoticeFor(request)
 		if text != stillWorkingReply() {
-			t.Fatalf("nudgeParamsFor(%q) text = %q, want the generic nudge text", request, text)
+			t.Fatalf("processingNoticeFor(%q) = %q, want the generic notice", request, text)
 		}
 	}
 }
@@ -599,15 +590,9 @@ func TestNudgeParamsForUsesMiddleThresholdForOtherSlowRequests(t *testing.T) {
 		"帮我做一份深度调研",
 	}
 	for _, request := range requests {
-		threshold, text := nudgeParamsFor(request)
-		if threshold != longRunningNudgeThreshold {
-			t.Fatalf("nudgeParamsFor(%q) threshold = %v, want longRunningNudgeThreshold (%v)", request, threshold, longRunningNudgeThreshold)
-		}
+		text := processingNoticeFor(request)
 		if text != longRunningStillWorkingReply() {
-			t.Fatalf("nudgeParamsFor(%q) text = %q, want the long-running nudge text", request, text)
-		}
-		if threshold <= imageGenerationNudgeThreshold || threshold >= stillWorkingThreshold {
-			t.Fatalf("long-running threshold (%v) should sit between image-generation (%v) and generic (%v)", threshold, imageGenerationNudgeThreshold, stillWorkingThreshold)
+			t.Fatalf("processingNoticeFor(%q) = %q, want the long-running notice", request, text)
 		}
 	}
 }
