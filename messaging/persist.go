@@ -21,6 +21,25 @@ func SetMessageStore(s *store.Store) {
 	messageStore = s
 }
 
+// LatestInboundContextToken returns the latest saved inbound context token for
+// one Bot/user pair. A nil store means persistence is unavailable, which is a
+// valid startup state and falls back to an empty reply context.
+func LatestInboundContextToken(ctx context.Context, botID, userID string) (string, error) {
+	if messageStore == nil {
+		return "", nil
+	}
+	return messageStore.LatestInboundContextToken(ctx, botID, userID)
+}
+
+// LatestOutboundMessage returns the latest persisted Bot message for one
+// Bot/user pair. A nil store or no matching message both return nil, nil.
+func LatestOutboundMessage(ctx context.Context, botID, userID string) (*store.OutboundMessage, error) {
+	if messageStore == nil {
+		return nil, nil
+	}
+	return messageStore.LatestOutboundMessage(ctx, botID, userID)
+}
+
 func persistMessage(rec store.MessageRecord) {
 	if messageStore == nil {
 		return

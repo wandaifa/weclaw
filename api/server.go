@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
 )
@@ -526,7 +527,16 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	// Send text if provided
 	if req.Text != "" {
-		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, "", "", messaging.ReplyMeta{Agent: "push"}); err != nil {
+		contextToken := ""
+		if config.IsOwner(req.To) {
+			var tokenErr error
+			contextToken, tokenErr = messaging.LatestInboundContextToken(ctx, client.BotID(), req.To)
+			if tokenErr != nil {
+				log.Printf("[api] load owner reply context failed: %v", tokenErr)
+				contextToken = ""
+			}
+		}
+		if err := messaging.SendTextReply(ctx, client, req.To, req.Text, contextToken, "", messaging.ReplyMeta{Agent: "push"}); err != nil {
 			log.Printf("[api] send text failed: %v", err)
 			http.Error(w, "send text failed: "+err.Error(), http.StatusInternalServerError)
 			return

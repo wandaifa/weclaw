@@ -122,3 +122,51 @@ func TestOpenIsIdempotent(t *testing.T) {
 		t.Fatalf("reopening should preserve existing rows, got %d", len(got))
 	}
 }
+
+func TestLatestInboundContextTokenReturnsNewestMatchingToken(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	for _, rec := range []MessageRecord{
+		{Time: time.Now(), Role: "user", BotID: "bot-a", UserID: "owner", Text: "first", ContextToken: "token-1"},
+		{Time: time.Now(), Role: "bot", BotID: "bot-a", UserID: "owner", Text: "reply"},
+		{Time: time.Now(), Role: "user", BotID: "bot-b", UserID: "owner", Text: "other bot", ContextToken: "wrong-bot"},
+		{Time: time.Now(), Role: "user", BotID: "bot-a", UserID: "other", Text: "other user", ContextToken: "wrong-user"},
+		{Time: time.Now(), Role: "user", BotID: "bot-a", UserID: "owner", Text: "newest", ContextToken: "token-2"},
+	} {
+		if err := s.InsertMessage(ctx, rec); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+	}
+
+	got, err := s.LatestInboundContextToken(ctx, "bot-a", "owner")
+	if err != nil {
+		t.Fatalf("LatestInboundContextToken: %v", err)
+	}
+	if got != "token-2" {
+		t.Fatalf("token = %q, want token-2", got)
+	}
+}
+
+func TestLatestOutboundMessageReturnsNewestMatchingBotMessage(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	latest := time.Date(2026, 8, 26, 8, 30, 0, 0, time.UTC)
+	for _, rec := range []MessageRecord{
+		{Time: latest.Add(-time.Minute), Role: "bot", BotID: "bot-a", UserID: "owner", Text: "older"},
+		{Time: latest, Role: "bot", BotID: "bot-a", UserID: "owner", Text: "latest"},
+		{Time: latest.Add(time.Minute), Role: "bot", BotID: "bot-b", UserID: "owner", Text: "wrong bot"},
+		{Time: latest.Add(2 * time.Minute), Role: "bot", BotID: "bot-a", UserID: "other", Text: "wrong user"},
+	} {
+		if err := s.InsertMessage(ctx, rec); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+	}
+
+	got, err := s.LatestOutboundMessage(ctx, "bot-a", "owner")
+	if err != nil {
+		t.Fatalf("LatestOutboundMessage: %v", err)
+	}
+	if got == nil || got.Text != "latest" || !got.Time.Equal(latest) {
+		t.Fatalf("message = %#v, want latest bot-a/owner row", got)
+	}
+}

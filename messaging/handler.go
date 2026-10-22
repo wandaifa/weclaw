@@ -79,6 +79,12 @@ type pendingMedia struct {
 
 const maxQueuedMessages = 20
 
+const (
+	continuationNoticePrefix      = "会话额度提醒："
+	continuationNoticeInstruction = "请回复数字 1 来续期。"
+	continuationAcknowledgement   = "已续期，自动推送监控继续运行。"
+)
+
 // MergeSettings controls how consecutive plain-text messages become one turn.
 type MergeSettings struct {
 	IdleDelay   time.Duration
@@ -759,7 +765,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		persistInboundText(botID, msg, text)
 	}
 	key := chatKey(client, msg.FromUserID)
-	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text) && extractQuoteRef(msg) == nil})
+	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text) && !isContinuationAcknowledgement(text) && extractQuoteRef(msg) == nil})
 	if !queued && notifyOverload {
 		reply := "消息较多，我会按顺序处理；请稍后再发新的需求。"
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, NewClientID()); err != nil {
@@ -949,6 +955,12 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 	// sandboxed conversation (see conversationPolicy) and never learns these
 	// commands exist.
 	owner := config.IsOwner(msg.FromUserID)
+	if owner && h.shouldAcknowledgeContinuation(ctx, client.BotID(), msg.FromUserID, text) {
+		if err := SendTextReply(ctx, client, msg.FromUserID, continuationAcknowledgement, msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send continuation acknowledgement to %s: %v", msg.FromUserID, err)
+		}
+		return
+	}
 
 	// Intercept URLs: save to Linkhoard directly without AI agent
 	trimmed := strings.TrimSpace(text)
@@ -1088,6 +1100,29 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 		// Multi-agent broadcast: parallel dispatch, send replies as they arrive
 		h.broadcastToAgents(ctx, client, msg, knownNames, message)
 	}
+}
+
+// isContinuationAcknowledgement reserves only the literal renewal command.
+// Every other message keeps its normal route to the selected agent.
+func isContinuationAcknowledgement(text string) bool {
+	return strings.TrimSpace(text) == "1"
+}
+
+// shouldAcknowledgeContinuation only intercepts the literal renewal command
+// when the most recent outbound message is the local iLink quota prompt.
+func (h *Handler) shouldAcknowledgeContinuation(ctx context.Context, botID, userID, text string) bool {
+	if !isContinuationAcknowledgement(text) {
+		return false
+	}
+	message, err := LatestOutboundMessage(ctx, botID, userID)
+	if err != nil {
+		log.Printf("[handler] failed to read latest outbound message for %s: %v", userID, err)
+		return false
+	}
+	if message == nil {
+		return false
+	}
+	return strings.Contains(message.Text, continuationNoticePrefix) && strings.Contains(message.Text, continuationNoticeInstruction)
 }
 
 // sendToDefaultAgent sends the message to the default agent and replies.

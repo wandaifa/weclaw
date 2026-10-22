@@ -17,6 +17,7 @@ import (
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/persona"
+	"github.com/fastclaw-ai/weclaw/store"
 )
 
 func newTestHandler() *Handler {
@@ -837,6 +838,44 @@ func TestQuotaDoesNotLimitOwner(t *testing.T) {
 		if !h.consumeQuota(ownerID) {
 			t.Fatalf("owner should never be quota-limited, blocked at attempt %d", i)
 		}
+	}
+}
+
+func TestContinuationAcknowledgementDoesNotReachAgent(t *testing.T) {
+	srv, sent := newFakeIlinkServer(t)
+	defer srv.Close()
+	messageStore := withTestStore(t)
+	ownerID := config.OwnerUserIDs()[0]
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	if err := messageStore.InsertMessage(context.Background(), store.MessageRecord{
+		Time: time.Now().Add(-24 * time.Hour), Role: "bot", BotID: client.BotID(), UserID: ownerID,
+		Text: "【wanqiu.ai 每小时监测】\n\n会话额度提醒：当前会话还剩 2 条主动消息额度。请回复数字 1 来续期。",
+	}); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
+
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex", fake)
+	h.HandleMessage(context.Background(), client, newTestMessage(ownerID, "1", 1))
+	h.waitForIdle()
+
+	if calls := fake.callsSnapshot(); len(calls) != 0 {
+		t.Fatalf("continuation acknowledgement should not reach the agent, got %v", calls)
+	}
+	if replies := sent.snapshot(); len(replies) != 1 || replies[0] != continuationAcknowledgement {
+		t.Fatalf("replies = %v, want only %q", replies, continuationAcknowledgement)
+	}
+}
+
+func TestOnlyOneIsContinuationAcknowledgement(t *testing.T) {
+	for _, text := range []string{"继续", "好", "收到", "11", "/new", "1 继续"} {
+		if isContinuationAcknowledgement(text) {
+			t.Fatalf("%q must remain a normal agent message", text)
+		}
+	}
+	if !isContinuationAcknowledgement(" 1 ") {
+		t.Fatal("trimmed literal 1 must acknowledge continuation")
 	}
 }
 

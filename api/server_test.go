@@ -7,10 +7,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
+	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/fastclaw-ai/weclaw/store"
 )
 
 func TestHandleSendRequiresBotIDForMultipleAccounts(t *testing.T) {
@@ -39,6 +44,49 @@ func TestHandleSendRejectsUnknownBotID(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleSendUsesLatestOwnerContextToken(t *testing.T) {
+	var got ilink.SendMessageRequest
+	ilinkServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ilink/bot/sendmessage" {
+			t.Fatalf("path = %s, want sendmessage", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode send request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ret":0}`))
+	}))
+	defer ilinkServer.Close()
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "weclaw.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer s.Close()
+	messaging.SetMessageStore(s)
+	t.Cleanup(func() { messaging.SetMessageStore(nil) })
+	ownerID := config.OwnerUserIDs()[0]
+	if err := s.InsertMessage(context.Background(), store.MessageRecord{
+		Time: time.Now(), Role: "user", BotID: "bot@im.bot", UserID: ownerID, Text: "hi", ContextToken: "saved-owner-context",
+	}); err != nil {
+		t.Fatalf("insert inbound message: %v", err)
+	}
+
+	server := NewServer([]*ilink.Client{ilink.NewClient(&ilink.Credentials{
+		ILinkBotID: "bot@im.bot", BotToken: "token", BaseURL: ilinkServer.URL,
+	})}, "")
+	req := httptest.NewRequest(http.MethodPost, "/api/send", bytes.NewBufferString(`{"to":"`+ownerID+`","text":"recovery test"}`))
+	rec := httptest.NewRecorder()
+	server.handleSend(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if got.Msg.ContextToken != "saved-owner-context" {
+		t.Fatalf("context token = %q, want saved owner context", got.Msg.ContextToken)
 	}
 }
 

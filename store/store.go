@@ -143,6 +143,14 @@ type StoredMessage struct {
 	Text string
 }
 
+// OutboundMessage is the most recent Bot message for one Bot/user pair.
+// It is intentionally limited to the fields needed to recognize a local
+// follow-up prompt; callers must not use it to expose chat history.
+type OutboundMessage struct {
+	Time time.Time
+	Text string
+}
+
 // RecentMessages returns the most recent messages, newest first. Intended
 // for tests; the wx-clawbot viewer queries the database directly in Python.
 func (s *Store) RecentMessages(ctx context.Context, limit int) ([]StoredMessage, error) {
@@ -161,6 +169,57 @@ func (s *Store) RecentMessages(ctx context.Context, limit int) ([]StoredMessage,
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// LatestOutboundMessage returns the latest Bot message sent to one user by
+// one Bot. A missing matching message is reported as nil, nil.
+func (s *Store) LatestOutboundMessage(ctx context.Context, botID, userID string) (*OutboundMessage, error) {
+	var sentAt string
+	var text string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT time, text
+		FROM messages
+		WHERE role = 'bot'
+		  AND bot_id = ?
+		  AND user_id = ?
+		ORDER BY id DESC
+		LIMIT 1`, botID, userID).Scan(&sentAt, &text)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query latest outbound message: %w", err)
+	}
+	parsedAt, err := time.Parse(time.RFC3339, sentAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse latest outbound message time: %w", err)
+	}
+	return &OutboundMessage{Time: parsedAt, Text: text}, nil
+}
+
+// LatestInboundContextToken returns the most recent non-empty iLink context
+// token received from one user by one Bot. It is used only to resume a reply
+// context after a transient connection failure; callers must never expose the
+// returned token outside the local process.
+func (s *Store) LatestInboundContextToken(ctx context.Context, botID, userID string) (string, error) {
+	var token string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT context_token
+		FROM messages
+		WHERE role = 'user'
+		  AND bot_id = ?
+		  AND user_id = ?
+		  AND context_token IS NOT NULL
+		  AND context_token != ''
+		ORDER BY id DESC
+		LIMIT 1`, botID, userID).Scan(&token)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("query latest inbound context token: %w", err)
+	}
+	return token, nil
 }
 
 func nullableString(s string) interface{} {
