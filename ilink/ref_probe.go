@@ -9,9 +9,13 @@ import (
 	"strings"
 )
 
-// refProbeValueKeys are ID and enum fields whose values are logged so IDs can be
-// matched against stored messages; every other string/number is reduced to its length.
-var refProbeValueKeys = map[string]bool{"svr_id": true, "msg_id": true, "message_id": true, "type": true}
+// refProbeValueKeys are ID, enum and timestamp fields whose values are logged so
+// they can be matched against stored messages; every other string/number is
+// reduced to its length.
+var refProbeValueKeys = map[string]bool{
+	"svr_id": true, "msg_id": true, "message_id": true, "type": true,
+	"create_time_ms": true, "update_time_ms": true,
+}
 
 // logRefMsgProbe logs the structure of quoted messages without logging chat content.
 func logRefMsgProbe(botID string, msg WeixinMessage) {

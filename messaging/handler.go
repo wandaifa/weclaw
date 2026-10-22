@@ -759,7 +759,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		persistInboundText(botID, msg, text)
 	}
 	key := chatKey(client, msg.FromUserID)
-	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text)})
+	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text) && extractQuoteRef(msg) == nil})
 	if !queued && notifyOverload {
 		reply := "消息较多，我会按顺序处理；请稍后再发新的需求。"
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, NewClientID()); err != nil {
@@ -910,6 +910,8 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 	if err := sendPendingLoginWelcome(ctx, client, msg); err != nil {
 		log.Printf("[handler] deferred login welcome failed for bot=%s: %v", client.BotID(), err)
 	}
+
+	ctx = withQuoteRef(ctx, msg)
 
 	// Extract text from item list (text message or voice transcription)
 	text := extractText(msg)
@@ -1454,7 +1456,7 @@ func (h *Handler) chatWithAgent(ctx context.Context, client *ilink.Client, ag ag
 	var reply string
 	var err error
 	withTypingRefreshEvery(ctx, client, userID, contextToken, typingRefreshInterval, nudgeThreshold, nudgeText, func() {
-		reply, err = ag.Chat(ctx, userID, message)
+		reply, err = ag.Chat(ctx, userID, withQuotedContext(ctx, client, userID, message))
 	})
 	elapsed := time.Since(start)
 

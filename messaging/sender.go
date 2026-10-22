@@ -172,6 +172,7 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 	if resp.Ret != 0 {
 		return fmt.Errorf("send message failed: ret=%d errmsg=%s", resp.Ret, resp.ErrMsg)
 	}
+	recordSentChunk(client.BotID(), toUserID, resp.MessageID, plainText)
 
 	log.Printf("[sender] bot=%s sent reply to %s: %q", client.BotID(), toUserID, truncate(text, 50))
 	persistMessage(store.MessageRecord{

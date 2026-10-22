@@ -235,8 +235,9 @@ type SendMsg struct {
 
 // SendMessageResponse is the response from sendmessage.
 type SendMessageResponse struct {
-	Ret    int    `json:"ret"`
-	ErrMsg string `json:"errmsg,omitempty"`
+	Ret       int       `json:"ret"`
+	ErrMsg    string    `json:"errmsg,omitempty"`
+	MessageID MessageID `json:"message_id,omitempty"`
 }
 
 // Typing status constants.
