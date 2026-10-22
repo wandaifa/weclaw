@@ -119,6 +119,7 @@ func (m *Monitor) Run(ctx context.Context) error {
 
 		// Process messages concurrently — don't block the poll loop
 		for _, msg := range resp.Msgs {
+			logRefMsgProbe(botID, msg)
 			go m.handler(ctx, m.client, msg)
 		}
 	}

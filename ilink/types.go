@@ -1,5 +1,7 @@
 package ilink
 
+import "encoding/json"
+
 // Message types
 const (
 	MessageTypeNone = 0
@@ -88,6 +90,8 @@ type MessageItem struct {
 	VoiceItem *VoiceItem `json:"voice_item,omitempty"`
 	VideoItem *VideoItem `json:"video_item,omitempty"`
 	FileItem  *FileItem  `json:"file_item,omitempty"`
+	// RefMsg is the quoted message; kept raw until its real shape is confirmed.
+	RefMsg json.RawMessage `json:"ref_msg,omitempty"`
 }
 
 // CDN media type constants.
