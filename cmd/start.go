@@ -189,6 +189,16 @@ func runStart(cmd *cobra.Command, args []string) error {
 	handler.SetUserAgents(cfg.UserAgents)
 	handler.SetUserPermissions(cfg.UserPermissions)
 	handler.SetAccessMode(cfg.AccessMode)
+	projectProgressUsers := make(map[string]struct{}, len(cfg.ProjectProgress.AllowedUserIDs))
+	for _, userID := range cfg.ProjectProgress.AllowedUserIDs {
+		projectProgressUsers[userID] = struct{}{}
+	}
+	projectProgressMaxAge := time.Duration(cfg.ProjectProgress.MaxAgeHours) * time.Hour
+	handler.SetProjectProgress(messaging.ProjectProgressSettings{
+		SnapshotPath:   cfg.ProjectProgress.SnapshotPath,
+		AllowedUserIDs: projectProgressUsers,
+		MaxAge:         projectProgressMaxAge,
+	})
 	handler.SetPersonaDir(personaDir)
 	handler.SetDefaultPersona(cfg.DefaultPersona)
 	handler.SetUserPersonas(cfg.UserPersonas)

@@ -22,7 +22,15 @@ type Config struct {
 	SaveDir                  string                    `json:"save_dir,omitempty"`
 	MessageMerge             MessageMergeConfig        `json:"message_merge,omitempty"`
 	MediaRetention           MediaRetentionConfig      `json:"media_retention,omitempty"`
+	ProjectProgress          ProjectProgressConfig     `json:"project_progress,omitempty"`
 	Agents                   map[string]AgentConfig    `json:"agents"`
+}
+
+// ProjectProgressConfig enables a read-only response backed by one generated snapshot.
+type ProjectProgressConfig struct {
+	SnapshotPath   string   `json:"snapshot_path,omitempty"`
+	AllowedUserIDs []string `json:"allowed_user_ids,omitempty"`
+	MaxAgeHours    int      `json:"max_age_hours,omitempty"`
 }
 
 // AccessMode gates whether a non-owner user's message reaches an agent at

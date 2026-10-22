@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -63,6 +64,7 @@ type Handler struct {
 	mergeSettings       MergeSettings
 	usageMu             sync.Mutex
 	usage               map[string]*dailyUsage // user ID -> today's message count (non-owner only, in-memory)
+	projectProgress     ProjectProgressSettings
 }
 
 // dailyUsage tracks one non-owner user's message count for the current local day.
@@ -75,6 +77,71 @@ type pendingMedia struct {
 	Kind string
 	Name string
 	Path string
+}
+
+// ProjectProgressSettings controls the read-only trademark-project snapshot reply.
+type ProjectProgressSettings struct {
+	SnapshotPath   string
+	AllowedUserIDs map[string]struct{}
+	MaxAge         time.Duration
+}
+
+const projectProgressUnavailableReply = "今日进度快照尚未生成。"
+
+func (h *Handler) SetProjectProgress(settings ProjectProgressSettings) {
+	if settings.MaxAge <= 0 {
+		settings.MaxAge = 36 * time.Hour
+	}
+	allowed := make(map[string]struct{}, len(settings.AllowedUserIDs))
+	for userID := range settings.AllowedUserIDs {
+		allowed[userID] = struct{}{}
+	}
+	settings.AllowedUserIDs = allowed
+	h.mu.Lock()
+	h.projectProgress = settings
+	h.mu.Unlock()
+}
+
+func isProjectProgressQuestion(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if len([]rune(trimmed)) > 20 {
+		return false
+	}
+	trimmed = strings.TrimRight(trimmed, "？?。！!")
+	for _, question := range []string{"商标进度", "今天干到哪了", "当前阻塞"} {
+		if trimmed == question || trimmed == "商标"+question {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Handler) projectProgressReply(userID, text string) (string, bool) {
+	if !isProjectProgressQuestion(text) {
+		return "", false
+	}
+	h.mu.RLock()
+	settings := h.projectProgress
+	h.mu.RUnlock()
+	if settings.SnapshotPath == "" {
+		return "", false
+	}
+	if _, allowed := settings.AllowedUserIDs[userID]; !allowed {
+		return "", false
+	}
+	var snapshot struct {
+		GeneratedAt string `json:"generated_at"`
+		Text        string `json:"text"`
+	}
+	data, err := os.ReadFile(settings.SnapshotPath)
+	if err != nil || json.Unmarshal(data, &snapshot) != nil || strings.TrimSpace(snapshot.Text) == "" {
+		return projectProgressUnavailableReply, true
+	}
+	generatedAt, err := time.Parse(time.RFC3339, snapshot.GeneratedAt)
+	if err != nil || time.Since(generatedAt) > settings.MaxAge {
+		return projectProgressUnavailableReply, true
+	}
+	return snapshot.Text, true
 }
 
 const maxQueuedMessages = 20
@@ -958,6 +1025,12 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 	if owner && h.shouldAcknowledgeContinuation(ctx, client.BotID(), msg.FromUserID, text) {
 		if err := SendTextReply(ctx, client, msg.FromUserID, continuationAcknowledgement, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send continuation acknowledgement to %s: %v", msg.FromUserID, err)
+		}
+		return
+	}
+	if reply, handled := h.projectProgressReply(msg.FromUserID, text); handled {
+		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
+			log.Printf("[handler] failed to send project progress reply to %s: %v", msg.FromUserID, err)
 		}
 		return
 	}

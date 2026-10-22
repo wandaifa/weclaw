@@ -114,6 +114,25 @@ func TestConfigUserAgentsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestProjectProgressConfigRoundTrip(t *testing.T) {
+	cfg := Config{ProjectProgress: ProjectProgressConfig{
+		SnapshotPath:   "/tmp/project-progress.json",
+		AllowedUserIDs: []string{"owner", "zhang"},
+		MaxAgeHours:    36,
+	}}
+	data, err := json.Marshal(&cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out Config
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.ProjectProgress.SnapshotPath != cfg.ProjectProgress.SnapshotPath || len(out.ProjectProgress.AllowedUserIDs) != 2 || out.ProjectProgress.MaxAgeHours != 36 {
+		t.Fatalf("project progress = %+v, want %+v", out.ProjectProgress, cfg.ProjectProgress)
+	}
+}
+
 func TestLoadEnvOverridesTopLevelOnly(t *testing.T) {
 	t.Setenv("WECLAW_DEFAULT_AGENT", "codex")
 	t.Setenv("WECLAW_API_ADDR", "127.0.0.1:18011")

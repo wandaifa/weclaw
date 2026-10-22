@@ -879,6 +879,33 @@ func TestOnlyOneIsContinuationAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestProjectProgressReplyRecognizesFixedShortQuestions(t *testing.T) {
+	h := newTestHandler()
+	path := filepath.Join(t.TempDir(), "project_progress.json")
+	snapshot := fmt.Sprintf(`{"generated_at":%q,"text":"商标项目进度\n当前阻塞：无"}`, time.Now().Format(time.RFC3339))
+	if err := os.WriteFile(path, []byte(snapshot), 0o600); err != nil {
+		t.Fatalf("write snapshot: %v", err)
+	}
+	h.SetProjectProgress(ProjectProgressSettings{
+		SnapshotPath:   path,
+		AllowedUserIDs: map[string]struct{}{"zhang": {}},
+		MaxAge:         36 * time.Hour,
+	})
+
+	for _, text := range []string{"商标进度", "今天干到哪了", "当前阻塞", "商标今天干到哪了"} {
+		reply, handled := h.projectProgressReply("zhang", text)
+		if !handled || reply != "商标项目进度\n当前阻塞：无" {
+			t.Fatalf("text %q reply=%q handled=%v", text, reply, handled)
+		}
+	}
+	if _, handled := h.projectProgressReply("zhang", "/tm"); handled {
+		t.Fatal("/tm must remain normal chat text")
+	}
+	if _, handled := h.projectProgressReply("stranger", "商标进度"); handled {
+		t.Fatal("unlisted user must not read the snapshot")
+	}
+}
+
 func TestUsageSnapshotTracksOwnerAsUnlimited(t *testing.T) {
 	h := newTestHandler()
 	ownerID := config.OwnerUserIDs()[0]
