@@ -49,3 +49,25 @@ func (s *Store) SentChunkText(ctx context.Context, botID, userID, serverMsgID st
 	}
 	return text, true, nil
 }
+
+// InboundMessageText returns the text of a message this user sent to this Bot,
+// looked up by its iLink message_id, so a quote of the user's own message can
+// be resolved. Only text/voice rows count: media rows store a file name, which
+// would mislead the agent. Scoped to the Bot/user pair like SentChunkText.
+func (s *Store) InboundMessageText(ctx context.Context, botID, userID, messageID string) (string, bool, error) {
+	var text string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT text FROM messages
+		WHERE role = 'user' AND bot_id = ? AND user_id = ? AND message_id = ?
+		  AND message_type IN ('text', 'voice') AND text != ''
+		ORDER BY id DESC
+		LIMIT 1`,
+		botID, userID, messageID).Scan(&text)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("query inbound message: %w", err)
+	}
+	return text, true, nil
+}

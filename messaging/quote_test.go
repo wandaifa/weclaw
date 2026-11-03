@@ -2,6 +2,8 @@ package messaging
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -131,5 +133,87 @@ func TestQuotedMessageIsNotMerged(t *testing.T) {
 	calls := fake.callsSnapshot()
 	if len(calls) != 2 || calls[0] != "第一句" || calls[1] != "[引用: 方案原文]\n这个呢" {
 		t.Fatalf("quoted message must stay separate with its quote, got %q", calls)
+	}
+}
+
+func md5Hex(s string) string {
+	sum := md5.Sum([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+func TestSlicePartialQuote(t *testing.T) {
+	full := "第一条消息：我今天要测试不分文字引用功能。😀我今天要测试"
+	sel := "不分文字引用功能。😀我今天要测试"
+	runeStart := len([]rune("第一条消息：我今天要测试"))
+	runeEnd := len([]rune(full))
+	cases := []struct {
+		name     string
+		p        partialQuote
+		wantUnit string
+	}{
+		{"rune exclusive", partialQuote{StartIndex: runeStart, EndIndex: runeEnd, MD5: md5Hex(sel)}, "rune"},
+		{"rune inclusive", partialQuote{StartIndex: runeStart, EndIndex: runeEnd - 1, MD5: md5Hex(sel)}, "rune+incl"},
+		// The emoji is two UTF-16 units, so only the utf16 slicer lands on the same text.
+		{"utf16", partialQuote{StartIndex: runeStart, EndIndex: runeEnd + 1, MD5: md5Hex(sel)}, "utf16"},
+		{"byte", partialQuote{StartIndex: len("第一条消息：我今天要测试"), EndIndex: len(full), MD5: md5Hex(sel)}, "byte"},
+		{"no digest uses first/last chars", partialQuote{StartIndex: runeStart, EndIndex: runeEnd, Start: "不", End: "试"}, "rune"},
+	}
+	for _, c := range cases {
+		got, unit, ok := slicePartialQuote(full, &c.p)
+		if !ok || got != sel || unit != c.wantUnit {
+			t.Fatalf("%s: got %q unit=%s ok=%v", c.name, got, unit, ok)
+		}
+	}
+	for name, p := range map[string]partialQuote{
+		"digest mismatch":   {StartIndex: runeStart, EndIndex: runeEnd, MD5: md5Hex("别的")},
+		"out of range":      {StartIndex: 5, EndIndex: 999, MD5: md5Hex(sel)},
+		"reversed":          {StartIndex: 9, EndIndex: 3},
+		"no digest no ends": {StartIndex: runeStart, EndIndex: runeEnd},
+	} {
+		if _, _, ok := slicePartialQuote(full, &p); ok {
+			t.Fatalf("%s must not match", name)
+		}
+	}
+}
+
+func TestQuotedOwnMessageIsResolvedForAgent(t *testing.T) {
+	withTestStore(t)
+	srv := newIDIlinkServer(t)
+	client := ilink.NewClient(&ilink.Credentials{BotToken: "tok", ILinkBotID: "bot1@im.bot", BaseURL: srv.URL})
+	h := NewHandler(nil, nil)
+	fake := &recordingAgent{}
+	h.SetDefaultAgent("codex-shared", fake)
+
+	full := "我今天要测试不分文字引用功能。我今天要测试"
+	sel := "不分文字引用功能。"
+	start := len([]rune("我今天要测试"))
+	partial := fmt.Sprintf(`{"message_item":{"msg_id":"7523403615187383560"},"partial_text":{"start":"不","end":"。","startindex":%d,"endindex":%d,"quotemd5":"%s"}}`,
+		start, start+len([]rune(sel)), md5Hex(sel))
+	badPartial := `{"message_item":{"msg_id":"7523403615187383560"},"partial_text":{"start":"x","end":"y","startindex":1,"endindex":3,"quotemd5":"00000000000000000000000000000000"}}`
+
+	// HandleMessage persists the inbound text synchronously, so the quotes below can resolve it.
+	h.HandleMessage(context.Background(), client, newTestMessage("user-a@im.wechat", full, 7523403615187383560))
+
+	h.HandleMessage(context.Background(), client, quotedMessage("user-a@im.wechat", "整条什么意思", 2, `{"message_item":{"msg_id":"7523403615187383560"}}`))
+	h.HandleMessage(context.Background(), client, quotedMessage("user-a@im.wechat", "这几个字呢", 3, partial))
+	h.HandleMessage(context.Background(), client, quotedMessage("user-a@im.wechat", "对不上的片段", 4, badPartial))
+	// Another user quoting the same ID must not see user-a's message.
+	h.HandleMessage(context.Background(), client, quotedMessage("user-b@im.wechat", "偷看", 5, `{"message_item":{"msg_id":"7523403615187383560"}}`))
+
+	waitFor(t, 6*time.Second, func() bool { return len(fake.callsSnapshot()) == 5 })
+	h.waitForIdle()
+	got := map[string]bool{}
+	for _, call := range fake.callsSnapshot() {
+		got[call] = true
+	}
+	for _, want := range []string{
+		"[引用: " + full + "]\n整条什么意思",
+		"[引用片段: " + sel + "]\n[片段所在原消息: " + full + "]\n这几个字呢",
+		"[引用: " + full + "]\n对不上的片段", // digest mismatch -> keep full text, never guess
+		"偷看",
+	} {
+		if !got[want] {
+			t.Fatalf("agent calls missing %q: %q", want, fake.callsSnapshot())
+		}
 	}
 }

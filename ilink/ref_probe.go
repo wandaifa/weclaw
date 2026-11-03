@@ -15,6 +15,9 @@ import (
 var refProbeValueKeys = map[string]bool{
 	"svr_id": true, "msg_id": true, "message_id": true, "type": true,
 	"create_time_ms": true, "update_time_ms": true,
+	// partial_text offsets and digest: needed to confirm which index unit the
+	// server uses; the quoted characters themselves stay reduced to lengths.
+	"startindex": true, "endindex": true, "quotemd5": true,
 }
 
 // logRefMsgProbe logs the structure of quoted messages without logging chat content.

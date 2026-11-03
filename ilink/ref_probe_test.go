@@ -9,7 +9,7 @@ import (
 func TestDescribeRefShapeHidesContentKeepsIDs(t *testing.T) {
 	raw := json.RawMessage(`{"title":"秘密摘要","svr_id":"7518691007733062920",
 		"message_item":{"type":1,"msg_id":18446744073709551615,"text_item":{"text":"私密内容"}},
-		"partial_text":{"start":"开头","startindex":3}}`)
+		"partial_text":{"start":"开头","startindex":3,"quotemd5":"abc123"}}`)
 	got := describeRefShape(raw)
 	for _, leak := range []string{"秘密摘要", "私密内容", "开头"} {
 		if strings.Contains(got, leak) {
@@ -22,7 +22,9 @@ func TestDescribeRefShapeHidesContentKeepsIDs(t *testing.T) {
 		`type:num(1)`,
 		`title:str(len=4)`,
 		`text:str(len=4)`,
-		`startindex:num(len=1)`,
+		`start:str(len=2)`,
+		`startindex:num(3)`,
+		`quotemd5:str("abc123")`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("shape missing %q: %s", want, got)
