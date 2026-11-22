@@ -43,6 +43,57 @@ func TestMarkdownNumberedListBreaksSurvive(t *testing.T) {
 	}
 }
 
+func TestFormatWeChatMarkdownKeepsTablesContiguous(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "screenshot table between paragraphs",
+			in:   "项目说明：\n| 维度 | 内容说明 | 对应文件 / 命令 |\n|---|---|---|\n| **项目名称** | ai-video-studio | `package.json` |\n| **质量验证** | 类型检查与测试 | `npm test` |\n---\n/snap 看屏幕",
+			want: "项目说明：\n\n| 维度 | 内容说明 | 对应文件 / 命令 |\n|---|---|---|\n| **项目名称** | ai-video-studio | `package.json` |\n| **质量验证** | 类型检查与测试 | `npm test` |\n\n---\n\n/snap 看屏幕",
+		},
+		{
+			name: "alignment and optional outer pipes",
+			in:   "名称 | 状态\n:--- | ---:\n构建 | 成功\n测试 | 通过",
+			want: "名称 | 状态\n:--- | ---:\n构建 | 成功\n测试 | 通过",
+		},
+		{
+			name: "one column table",
+			in:   "| 名称 |\n| --- |\n| 构建 |",
+			want: "| 名称 |\n| --- |\n| 构建 |",
+		},
+		{
+			name: "lists still have visible breaks around a table",
+			in:   "- 第一项\n- 第二项\n\n| 名称 | 状态 |\n| --- | --- |\n| 构建 | 成功 |\n\n1. 检查\n2. 发布",
+			want: "- 第一项\n\n- 第二项\n\n| 名称 | 状态 |\n| --- | --- |\n| 构建 | 成功 |\n\n1. 检查\n\n2. 发布",
+		},
+		{
+			name: "pipe text without a valid delimiter is not a table",
+			in:   "| 名称 | 状态 |\n| abc | --- |\n| 构建 | 成功 |",
+			want: "| 名称 | 状态 |\n\n| abc | --- |\n\n| 构建 | 成功 |",
+		},
+		{
+			name: "mismatched header and delimiter are not a table",
+			in:   "| 名称 | 状态 |\n| --- |\n| 构建 | 成功 |",
+			want: "| 名称 | 状态 |\n\n| --- |\n\n| 构建 | 成功 |",
+		},
+		{
+			name: "code fences keep original newlines",
+			in:   "示例：\n```md\n| 名称 | 状态 |\n| --- | --- |\n| 构建 | 成功 |\n```\n结束",
+			want: "示例：\n\n```md\n| 名称 | 状态 |\n| --- | --- |\n| 构建 | 成功 |\n```\n\n结束",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := FormatWeChatMarkdown(tt.in); got != tt.want {
+				t.Fatalf("FormatWeChatMarkdown() = %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestWeChatTextChunksKeepParagraphsAndStayWithinLimit(t *testing.T) {
 	input := "# 进度\n\n" + strings.Repeat("第一段内容。", 400) + "\n\n" + strings.Repeat("第二段内容。", 400)
 	chunks := WeChatTextChunks(input, 1800)

@@ -110,11 +110,94 @@ func MarkdownToPlainText(text string) string {
 	return strings.TrimSpace(result)
 }
 
+var (
+	reFileLink          = regexp.MustCompile(`\[([^\]]+)\]\(file://[^)]*\)`)
+	reMarkdownTableCell = regexp.MustCompile(`^:?-{3,}:?$`)
+	reExtraBlankLines   = regexp.MustCompile(`\n{3,}`)
+)
+
+// FormatWeChatMarkdown preserves Markdown headings (#/##/###), bold (**...**),
+// inline code (`...`), and fenced code blocks (```...```) for WeChat's native
+// Markdown renderer, while converting non-clickable local file:// links to
+// inline code and promoting single newlines outside code blocks and tables to
+// blank lines so WeChat does not collapse consecutive list items.
+func FormatWeChatMarkdown(text string) string {
+	result := reImage.ReplaceAllString(text, "")
+	result = reFileLink.ReplaceAllString(result, "`$1`")
+
+	// Split by fenced code blocks so newlines inside ```...``` stay single "\n".
+	var out strings.Builder
+	last := 0
+	for _, loc := range reCodeBlock.FindAllStringIndex(result, -1) {
+		outside := result[last:loc[0]]
+		out.WriteString(formatWeChatMarkdownLines(outside))
+		out.WriteString(result[loc[0]:loc[1]])
+		last = loc[1]
+	}
+	outside := result[last:]
+	out.WriteString(formatWeChatMarkdownLines(outside))
+	return strings.TrimSpace(out.String())
+}
+
+func formatWeChatMarkdownLines(text string) string {
+	lines := strings.Split(text, "\n")
+	var out strings.Builder
+	inTable := false
+	for i, line := range lines {
+		if i > 0 {
+			if inTable && strings.Contains(line, "|") {
+				out.WriteByte('\n')
+			} else {
+				out.WriteString("\n\n")
+				inTable = false
+			}
+		}
+		out.WriteString(line)
+		if i+1 < len(lines) && isMarkdownTableHeader(line, lines[i+1]) {
+			inTable = true
+		}
+	}
+	return reExtraBlankLines.ReplaceAllString(out.String(), "\n\n")
+}
+
+func isMarkdownTableHeader(header, separator string) bool {
+	if !strings.Contains(header, "|") || !strings.Contains(separator, "|") {
+		return false
+	}
+	cells := func(line string) []string {
+		line = strings.TrimSpace(line)
+		line = strings.TrimPrefix(line, "|")
+		line = strings.TrimSuffix(line, "|")
+		return strings.Split(line, "|")
+	}
+	headerCells, separatorCells := cells(header), cells(separator)
+	if len(headerCells) != len(separatorCells) {
+		return false
+	}
+	for _, cell := range separatorCells {
+		if !reMarkdownTableCell.MatchString(strings.TrimSpace(cell)) {
+			return false
+		}
+	}
+	return true
+}
+
+// WeChatMarkdownChunks splits Markdown text into chunks under limit without
+// stripping Markdown syntax.
+func WeChatMarkdownChunks(text string, limit int) []string {
+	formatted := FormatWeChatMarkdown(text)
+	return splitFormattedChunks(formatted, limit)
+}
+
 // WeChatTextChunks turns Markdown into readable WeChat text and splits only at
 // paragraph or sentence boundaries when one text message would be too long.
 // limit is a UTF-8 byte limit, matching the iLink payload limit.
 func WeChatTextChunks(text string, limit int) []string {
 	plain := MarkdownToPlainText(text)
+	return splitFormattedChunks(plain, limit)
+}
+
+func splitFormattedChunks(plain string, limit int) []string {
 	if limit <= 0 || len(plain) <= limit {
 		return []string{plain}
 	}

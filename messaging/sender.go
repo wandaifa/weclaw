@@ -103,8 +103,9 @@ func withTypingRefreshEvery(ctx context.Context, client *ilink.Client, userID, c
 // (a system/utility reply like a busy or quota notice) unless the "push"
 // sentinel is used for CLI/API-initiated sends.
 type ReplyMeta struct {
-	Agent     string
-	ElapsedMS int64
+	Agent       string
+	ElapsedMS   int64
+	RawMarkdown bool
 }
 
 // SendTextReply sends a text reply to a user through the iLink API.
@@ -119,7 +120,13 @@ func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, co
 		m = meta[0]
 	}
 
-	for index, chunk := range WeChatTextChunks(text, weChatTextSafetyLimitBytes) {
+	var chunks []string
+	if m.RawMarkdown {
+		chunks = WeChatMarkdownChunks(text, weChatTextSafetyLimitBytes)
+	} else {
+		chunks = WeChatTextChunks(text, weChatTextSafetyLimitBytes)
+	}
+	for index, chunk := range chunks {
 		chunkClientID := clientID
 		if index > 0 {
 			chunkClientID = NewClientID()
