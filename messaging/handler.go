@@ -17,6 +17,7 @@ import (
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/persona"
+	"github.com/fastclaw-ai/weclaw/terminal"
 	"github.com/google/uuid"
 )
 
@@ -65,6 +66,7 @@ type Handler struct {
 	usageMu             sync.Mutex
 	usage               map[string]*dailyUsage // user ID -> today's message count (non-owner only, in-memory)
 	projectProgress     ProjectProgressSettings
+	terminal            *terminal.Manager
 }
 
 // dailyUsage tracks one non-owner user's message count for the current local day.
@@ -832,7 +834,7 @@ func (h *Handler) HandleMessage(ctx context.Context, client *ilink.Client, msg i
 		persistInboundText(botID, msg, text)
 	}
 	key := chatKey(client, msg.FromUserID)
-	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text) && !isContinuationAcknowledgement(text) && extractQuoteRef(msg) == nil})
+	queued, notifyOverload := h.enqueueChat(key, chatJob{ctx: ctx, client: client, msg: msg, text: text, mergeable: directText && h.isMergeableText(text) && !isContinuationAcknowledgement(text) && extractQuoteRef(msg) == nil && !h.isTerminalPassthroughNoMerge(botID, msg.FromUserID)})
 	if !queued && notifyOverload {
 		reply := "消息较多，我会按顺序处理；请稍后再发新的需求。"
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, NewClientID()); err != nil {
@@ -1032,6 +1034,9 @@ func (h *Handler) handleMessage(ctx context.Context, client *ilink.Client, msg i
 		if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID); err != nil {
 			log.Printf("[handler] failed to send project progress reply to %s: %v", msg.FromUserID, err)
 		}
+		return
+	}
+	if owner && h.handleOwnerTerminal(ctx, client, msg, text, clientID) {
 		return
 	}
 
@@ -1871,7 +1876,13 @@ func buildHelpText(owner bool) string {
 @agent or /agent - Switch agent for the current WeChat user
 @agent msg or /agent msg - Send to a specific agent
 @a @b msg - Broadcast to multiple agents
-/new or /clear - Start a new session
+/clear - Start a new chat session
+/new [dir] - Open a new iTerm2 window and enter terminal mode
+/ls - List iTerm2 sessions
+/use N - Switch to iTerm2 session N
+/close N - Close iTerm2 session N
+/codex /claude /agy - Launch in terminal mode (/codex /claude switch agent in chat mode)
+/snap /key /exit - Screen capture, special keys, exit terminal mode
 /cwd /path - Switch workspace directory
 /info - Show current agent info
 /help - Show this help message

@@ -20,6 +20,7 @@ import (
 	"github.com/fastclaw-ai/weclaw/messaging"
 	"github.com/fastclaw-ai/weclaw/persona"
 	"github.com/fastclaw-ai/weclaw/store"
+	"github.com/fastclaw-ai/weclaw/terminal"
 	"github.com/mdp/qrterminal/v3"
 	"github.com/spf13/cobra"
 )
@@ -209,6 +210,13 @@ func runStart(cmd *cobra.Command, args []string) error {
 	}
 	handler.SetNonOwnerDefaultAgent(nonOwnerDefaultAgent)
 	handler.SetAllowNonOwnerAgentSwitch(cfg.AllowNonOwnerAgentSwitch)
+
+	terminalStatePath, err := terminal.DefaultStatePath()
+	if err != nil {
+		return fmt.Errorf("resolve terminal state path: %w", err)
+	}
+	terminalMgr := terminal.NewManager(terminal.NewBridgeClient(""), terminalStatePath)
+	handler.SetTerminalManager(terminalMgr)
 
 	// Populate agent metas for /status
 	var metas []messaging.AgentMeta
@@ -622,6 +630,26 @@ func runStart(cmd *cobra.Command, args []string) error {
 			Added:    result.Added,
 			Replaced: result.Replaced,
 		}, nil
+	})
+	apiServer.SetTerminalResultController(func(ctx context.Context, clients []*ilink.Client, req terminal.ResultNotification) (string, error) {
+		botID, userID, ok := terminalMgr.LookupBoundOwner(req.SessionID)
+		if !ok {
+			return "ignored", nil
+		}
+		client, err := ilink.SelectClient(clients, botID)
+		if err != nil {
+			return "", err
+		}
+		contextToken, tokenErr := messaging.LatestInboundContextToken(ctx, client.BotID(), userID)
+		if tokenErr != nil {
+			log.Printf("[terminal] load owner reply context failed: %v", tokenErr)
+			contextToken = ""
+		}
+		reply := messaging.FormatTerminalResult(req)
+		if err := messaging.SendTextReply(ctx, client, userID, reply, contextToken, "", messaging.ReplyMeta{Agent: "terminal", RawMarkdown: true}); err != nil {
+			return "", err
+		}
+		return "sent", nil
 	})
 	go func() {
 		if err := apiServer.Run(ctx); err != nil {

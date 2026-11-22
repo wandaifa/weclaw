@@ -13,6 +13,7 @@ import (
 	"github.com/fastclaw-ai/weclaw/config"
 	"github.com/fastclaw-ai/weclaw/ilink"
 	"github.com/fastclaw-ai/weclaw/messaging"
+	"github.com/fastclaw-ai/weclaw/terminal"
 )
 
 const (
@@ -32,6 +33,7 @@ const (
 	PersonasPath           = "/api/internal/personas"
 	PersonaDeletePath      = "/api/internal/personas/delete"
 	PermissionsPersonaPath = "/api/internal/permissions/persona"
+	TerminalResultPath     = "/api/internal/terminal/result"
 )
 
 // AccountReloadResult describes the accounts active after a reload.
@@ -228,6 +230,10 @@ type PermissionPersonaRequest struct {
 // persona binding, leaving Level/DailyLimit/Blocked untouched.
 type PermissionPersonaController func(context.Context, PermissionPersonaRequest) (UserPermissionInfo, error)
 
+// TerminalResultController receives an asynchronous terminal/agent completion
+// callback from iterm_bridge.py or a CLI hook and forwards it if bound.
+type TerminalResultController func(context.Context, []*ilink.Client, terminal.ResultNotification) (string, error)
+
 // Server provides an HTTP API for sending messages.
 type Server struct {
 	mu                 sync.RWMutex
@@ -255,6 +261,7 @@ type Server struct {
 	savePersona        PersonaSaveController
 	deletePersona      PersonaDeleteController
 	setPersonaBinding  PermissionPersonaController
+	terminalResult     TerminalResultController
 	addr               string
 }
 
@@ -420,6 +427,13 @@ func (s *Server) SetPermissionPersonaController(controller PermissionPersonaCont
 	s.setPersonaBinding = controller
 }
 
+// SetTerminalResultController handles terminal/hook result callbacks through the loopback API.
+func (s *Server) SetTerminalResultController(controller TerminalResultController) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.terminalResult = controller
+}
+
 // SendRequest is the JSON body for POST /api/send.
 type SendRequest struct {
 	BotID    string `json:"bot_id,omitempty"`
@@ -449,6 +463,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc(PersonasPath, s.handlePersonas)
 	mux.HandleFunc(PersonaDeletePath, s.handlePersonaDelete)
 	mux.HandleFunc(PermissionsPersonaPath, s.handlePermissionsPersona)
+	mux.HandleFunc(TerminalResultPath, s.handleTerminalResult)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "ok")
@@ -1108,6 +1123,36 @@ func (s *Server) handlePermissionsPersona(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(updated)
+}
+
+func (s *Server) handleTerminalResult(w http.ResponseWriter, r *http.Request) {
+	if !isLoopbackRequest(r.RemoteAddr) {
+		http.Error(w, "local requests only", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.RLock()
+	controller := s.terminalResult
+	s.mu.RUnlock()
+	if controller == nil {
+		http.Error(w, "terminal result handler unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	var req terminal.ResultNotification
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	status, err := controller(r.Context(), s.clientsSnapshot(), req)
+	if err != nil {
+		http.Error(w, "terminal result failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": status})
 }
 
 func (s *Server) handleAccounts(w http.ResponseWriter, r *http.Request) {
