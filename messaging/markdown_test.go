@@ -94,6 +94,33 @@ func TestFormatWeChatMarkdownKeepsTablesContiguous(t *testing.T) {
 	}
 }
 
+func TestWeChatHeadingHierarchy(t *testing.T) {
+	in := "## 商品检查\n### 入库\n#### 标签\n### 包装\n\n```md\n### 示例\n```\n### 售后"
+	want := "## 商品检查\n\n### 1. 入库\n\n#### 1.1 标签\n\n### 2. 包装\n\n```md\n### 示例\n```\n\n### 3. 售后"
+	for _, input := range []string{in, want} {
+		if got := FormatWeChatMarkdown(input); got != want {
+			t.Fatalf("formatted headings = %q, want %q", got, want)
+		}
+	}
+	manual := "# 验收\n\n## 三、批次\n\n## 备注"
+	if got := FormatWeChatMarkdown(manual); got != manual {
+		t.Fatalf("author's outline changed: %q", got)
+	}
+	if got := FormatWeChatMarkdown("# 商品\n### 包装\n## 库存"); got != "# 商品\n\n### 1. 包装\n\n## 2. 库存" {
+		t.Fatalf("skipped heading level produced an invalid outline: %q", got)
+	}
+}
+
+func TestWeChatCodeExamplesStayLiteral(t *testing.T) {
+	code := "````md\n## 图\n```\n![样品](https://example.com/p.png)\n\n\n```\n````"
+	inline := "``![图](https://example.com/i.png) `x``` x``"
+	input := "# 标题\n" + code + "\n" + inline
+	want := "# 标题\n\n" + code + "\n\n" + inline
+	if got := FormatWeChatMarkdown(input); got != want {
+		t.Fatalf("code example changed: %q", got)
+	}
+}
+
 func TestWeChatTextChunksKeepParagraphsAndStayWithinLimit(t *testing.T) {
 	input := "# 进度\n\n" + strings.Repeat("第一段内容。", 400) + "\n\n" + strings.Repeat("第二段内容。", 400)
 	chunks := WeChatTextChunks(input, 1800)

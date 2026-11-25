@@ -16,18 +16,53 @@ import (
 	"github.com/fastclaw-ai/weclaw/ilink"
 )
 
-// reMarkdownImage matches markdown image syntax: ![alt](url)
-var reMarkdownImage = regexp.MustCompile(`!\[[^\]]*\]\(([^)]+)\)`)
+// Keep balanced URL components such as pack(1).png inside the destination.
+// A space before a quoted or parenthesized title ends the URL.
+var reMarkdownImage = regexp.MustCompile(`(\\*)!\[([^\]\n]*)\]\([ \t]*` +
+	`((?:[^()\s]|\([^()\s]*\))*)` +
+	`(?:[ \t]+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?[ \t]*\)`)
 
-// ExtractImageURLs extracts image URLs from markdown text.
-func ExtractImageURLs(text string) []string {
-	matches := reMarkdownImage.FindAllStringSubmatch(text, -1)
-	var urls []string
-	for _, m := range matches {
-		url := strings.TrimSpace(m[1])
-		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-			urls = append(urls, url)
+// replaceMarkdownImages receives prose outside code spans and fences.
+func replaceMarkdownImages(text string, remote func(alt, url string) string) string {
+	return reMarkdownImage.ReplaceAllStringFunc(text, func(image string) string {
+		parts := reMarkdownImage.FindStringSubmatch(image)
+		escapes, alt, url := parts[1], parts[2], parts[3]
+		if len(escapes)%2 != 0 {
+			return image
 		}
+		if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
+			return escapes + remote(alt, url)
+		}
+		return escapes
+	})
+}
+
+func weChatImageLinks(text string) string {
+	return replaceMarkdownImages(text, func(alt, url string) string {
+		if strings.TrimSpace(alt) == "" {
+			alt = "图片"
+		}
+		return "[" + alt + "](" + url + ")"
+	})
+}
+
+// ExtractImageURLs collects remote images embedded in prose, skipping examples.
+func ExtractImageURLs(text string) []string {
+	if !strings.Contains(text, "![") {
+		return nil
+	}
+	var urls []string
+	var fence markdownFence
+	for line := range strings.SplitSeq(text, "\n") {
+		if fence.consume(line) || !strings.Contains(line, "![") {
+			continue
+		}
+		mapWeChatInlineText(line, func(prose string) string {
+			return replaceMarkdownImages(prose, func(_, url string) string {
+				urls = append(urls, url)
+				return ""
+			})
+		})
 	}
 	return urls
 }

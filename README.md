@@ -126,7 +126,7 @@ WeClaw supports sending images, videos, files, and voice messages to/from WeChat
 
 **From agent replies:** When an AI agent returns markdown with images (`![](url)`), WeClaw automatically extracts the image URLs, downloads them, uploads to WeChat CDN (AES-128-ECB encrypted), and sends them as image messages.
 
-**Markdown handling:** Agent responses are automatically converted from markdown to plain text for WeChat display — code fences are stripped, links show display text only, bold/italic markers are removed, etc.
+Agent and terminal replies keep Markdown tables, emphasis, links, and code blocks. WeClaw numbers subheadings in unnumbered outlines and displays an escaped pipe inside a table cell as `｜`. Remote Markdown images keep a link in the text. Agent replies also send the image as a separate message.
 
 ## Proactive Messaging
 

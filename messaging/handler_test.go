@@ -30,6 +30,19 @@ func newTestHandler() *Handler {
 	}
 }
 
+func TestAgentReplySendsWeChatMarkdown(t *testing.T) {
+	srv, sent := newFakeIlinkServer(t)
+	defer srv.Close()
+	client := ilink.NewClient(&ilink.Credentials{ILinkBotID: "test@im.bot", BaseURL: srv.URL})
+	msg := ilink.WeixinMessage{FromUserID: "user@im.wechat", ContextToken: "ctx"}
+	reply := "# 商品检查\n## 入库\n| 商品 | 数量 | 单价 |\n| --- | ---: | ---: |\n| 试香纸 \\| 单张 | 50 | 0.20 |"
+	newTestHandler().sendReplyWithMedia(context.Background(), client, msg, "codex", reply, "test-format", 0)
+	want := "# 商品检查\n\n## 1. 入库\n\n| 商品 | 数量 | 单价 |\n| --- | ---: | ---: |\n| 试香纸 ｜ 单张 | 50 | 0.20 |"
+	if got := sent.snapshot(); len(got) != 1 || got[0] != want {
+		t.Fatalf("sent reply = %q, want %q", got, want)
+	}
+}
+
 // recordingAgent is a minimal agent.Agent test double that records every
 // message it receives without doing any real work.
 type recordingAgent struct {

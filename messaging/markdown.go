@@ -3,6 +3,7 @@ package messaging
 import (
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -113,51 +114,152 @@ func MarkdownToPlainText(text string) string {
 var (
 	reFileLink          = regexp.MustCompile(`\[([^\]]+)\]\(file://[^)]*\)`)
 	reMarkdownTableCell = regexp.MustCompile(`^:?-{3,}:?$`)
-	reExtraBlankLines   = regexp.MustCompile(`\n{3,}`)
+	reBackticks         = regexp.MustCompile("`+")
+	reATXHeading        = regexp.MustCompile(`^ {0,3}(#{1,6})[ \t]+(\S.*)$`)
+	reSectionNumber     = regexp.MustCompile(`^([（(]?[0-9一二三四五六七八九十百零〇]+([.．][0-9]+)*([、.．）)]|[ \t])|第[0-9一二三四五六七八九十百零〇]+[章节篇部分])`)
 )
 
-// FormatWeChatMarkdown preserves Markdown headings (#/##/###), bold (**...**),
-// inline code (`...`), and fenced code blocks (```...```) for WeChat's native
-// Markdown renderer, while converting non-clickable local file:// links to
-// inline code and promoting single newlines outside code blocks and tables to
-// blank lines so WeChat does not collapse consecutive list items.
-func FormatWeChatMarkdown(text string) string {
-	result := reImage.ReplaceAllString(text, "")
-	result = reFileLink.ReplaceAllString(result, "`$1`")
-
-	// Split by fenced code blocks so newlines inside ```...``` stay single "\n".
-	var out strings.Builder
-	last := 0
-	for _, loc := range reCodeBlock.FindAllStringIndex(result, -1) {
-		outside := result[last:loc[0]]
-		out.WriteString(formatWeChatMarkdownLines(outside))
-		out.WriteString(result[loc[0]:loc[1]])
-		last = loc[1]
-	}
-	outside := result[last:]
-	out.WriteString(formatWeChatMarkdownLines(outside))
-	return strings.TrimSpace(out.String())
+// consume reports whether the line belongs to a fence, including its delimiters.
+type markdownFence struct {
+	marker byte
+	width  int
 }
 
-func formatWeChatMarkdownLines(text string) string {
-	lines := strings.Split(text, "\n")
+func (f *markdownFence) consume(line string) bool {
+	inside := f.width > 0
+	body := strings.TrimLeft(line, " ")
+	if len(line)-len(body) > 3 || len(body) < 3 || (body[0] != '`' && body[0] != '~') {
+		return inside
+	}
+	width := 1
+	for width < len(body) && body[width] == body[0] {
+		width++
+	}
+	if inside {
+		if body[0] == f.marker && width >= f.width && strings.TrimSpace(body[width:]) == "" {
+			f.width = 0
+		}
+		return true
+	}
+	if width < 3 || (body[0] == '`' && strings.ContainsRune(body[width:], '`')) {
+		return false
+	}
+	f.marker, f.width = body[0], width
+	return true
+}
+
+func mapWeChatInlineText(line string, transform func(string) string) string {
+	if !strings.ContainsRune(line, '`') {
+		return transform(line)
+	}
+	runs := reBackticks.FindAllStringIndex(line, -1)
 	var out strings.Builder
+	start := 0
+	for i := 0; i < len(runs); i++ {
+		open := runs[i]
+		before := line[:open[0]]
+		if (len(before)-len(strings.TrimRight(before, "\\")))%2 != 0 {
+			continue
+		}
+		for j := i + 1; j < len(runs); j++ {
+			close := runs[j]
+			if close[1]-close[0] == open[1]-open[0] {
+				out.WriteString(transform(line[start:open[0]]))
+				out.WriteString(line[open[0]:close[1]])
+				start, i = close[1], j
+				break
+			}
+		}
+	}
+	return out.String() + transform(line[start:])
+}
+
+// WeChat draws all heading levels at much the same size. An unnumbered outline
+// gets section numbers below its top level. Keep author-supplied numbering.
+func numberWeChatSubheadings(lines []string) {
+	type heading struct{ row, level, title int }
+	var headings []heading
+	var fence markdownFence
+	top := 6
+	for row, line := range lines {
+		if fence.consume(line) || !strings.Contains(line, "#") {
+			continue
+		}
+		m := reATXHeading.FindStringSubmatchIndex(line)
+		if m == nil {
+			continue
+		}
+		if reSectionNumber.MatchString(line[m[4]:]) {
+			return
+		}
+		level := m[3] - m[2]
+		top = min(top, level)
+		headings = append(headings, heading{row, level, m[4]})
+	}
+	type section struct{ level, children int }
+	parents := []section{{level: top}}
+	for _, h := range headings {
+		if h.level == top {
+			parents = []section{{level: top}}
+			continue
+		}
+		for parents[len(parents)-1].level >= h.level {
+			parents = parents[:len(parents)-1]
+		}
+		parents[len(parents)-1].children++
+		var parts []string
+		for _, p := range parents {
+			parts = append(parts, strconv.Itoa(p.children))
+		}
+		number := strings.Join(parts, ".")
+		if len(parts) == 1 {
+			number += "."
+		}
+		line := lines[h.row]
+		lines[h.row] = line[:h.title] + number + " " + line[h.title:]
+		parents = append(parents, section{level: h.level})
+	}
+}
+
+// FormatWeChatMarkdown prepares agent and terminal replies for WeChat's native
+// renderer while preserving newlines inside fenced code and pipe tables.
+func FormatWeChatMarkdown(text string) string {
+	lines := strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n")
+	numberWeChatSubheadings(lines)
+	var out strings.Builder
+	var fence markdownFence
 	inTable := false
 	for i, line := range lines {
-		if i > 0 {
-			if inTable && strings.Contains(line, "|") {
+		insideFence := fence.width > 0
+		fenced := fence.consume(line)
+		if !fenced && strings.TrimSpace(line) == "" {
+			inTable = false
+			continue
+		}
+		tableRow := !fenced && inTable && strings.Contains(weChatTableRow(line), "|")
+		if out.Len() > 0 {
+			if insideFence || tableRow {
 				out.WriteByte('\n')
 			} else {
 				out.WriteString("\n\n")
-				inTable = false
 			}
 		}
-		out.WriteString(line)
-		if i+1 < len(lines) && isMarkdownTableHeader(line, lines[i+1]) {
-			inTable = true
+		if fenced {
+			out.WriteString(line)
+			inTable = false
+			continue
 		}
+		inTable = tableRow || (i+1 < len(lines) && isMarkdownTableHeader(line, lines[i+1]))
+		if inTable {
+			line = weChatTableRow(line)
+		}
+		line = mapWeChatInlineText(line, func(prose string) string {
+			prose = weChatImageLinks(weChatEmphasis(prose))
+			return reFileLink.ReplaceAllString(prose, "`$1`")
+		})
+		out.WriteString(line)
 	}
-	return reExtraBlankLines.ReplaceAllString(out.String(), "\n\n")
+	return strings.TrimSpace(out.String())
 }
 
 func isMarkdownTableHeader(header, separator string) bool {
@@ -170,7 +272,7 @@ func isMarkdownTableHeader(header, separator string) bool {
 		line = strings.TrimSuffix(line, "|")
 		return strings.Split(line, "|")
 	}
-	headerCells, separatorCells := cells(header), cells(separator)
+	headerCells, separatorCells := cells(weChatTableRow(header)), cells(separator)
 	if len(headerCells) != len(separatorCells) {
 		return false
 	}

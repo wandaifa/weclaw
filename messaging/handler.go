@@ -1514,7 +1514,7 @@ func (h *Handler) sendReplyWithMedia(ctx context.Context, client *ilink.Client, 
 
 	reply = rewriteReplyWithAttachmentResults(reply, sentPaths, failedPaths)
 
-	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID, ReplyMeta{Agent: agentName, ElapsedMS: elapsed.Milliseconds()}); err != nil {
+	if err := SendTextReply(ctx, client, msg.FromUserID, reply, msg.ContextToken, clientID, ReplyMeta{Agent: agentName, ElapsedMS: elapsed.Milliseconds(), RawMarkdown: true}); err != nil {
 		log.Printf("[handler] failed to send reply to %s: %v", msg.FromUserID, err)
 	}
 

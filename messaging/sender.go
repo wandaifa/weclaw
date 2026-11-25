@@ -109,8 +109,8 @@ type ReplyMeta struct {
 }
 
 // SendTextReply sends a text reply to a user through the iLink API.
-// If clientID is empty, a new one is generated. meta is optional and only
-// affects what gets persisted, never the send itself.
+// If clientID is empty, a new one is generated. Agent and terminal replies
+// opt into WeChat Markdown through meta. Other callers default to plain text.
 func SendTextReply(ctx context.Context, client *ilink.Client, toUserID, text, contextToken, clientID string, meta ...ReplyMeta) error {
 	if clientID == "" {
 		clientID = NewClientID()
